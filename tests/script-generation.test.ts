@@ -69,6 +69,18 @@ test('the customer service template requests distinct cases within the same four
   }
 });
 
+test('both travel scenarios request a complete revised flight itinerary and wait for approval', () => {
+  const travel = DEFAULT_SCRIPT_BRIEF.split('Call 4 — Flight & Hotel Travel')[1]?.split('\n\n')[0];
+  assert.ok(travel);
+  assert.match(travel, /Rebook a flight or adjust a hotel booking after a flight change/);
+  assert.match(travel, /In both scenarios, read back the revised itinerary in natural speech/);
+  assert.match(travel, /airline name, a plausible flight number with that airline's designator/);
+  assert.match(travel, /departure and arrival dates and times in each airport's local time/);
+  assert.match(travel, /arrival date explicitly, especially if it changes overnight/);
+  assert.match(travel, /dates consistent with any hotel change/);
+  assert.match(travel, /asking for approval and confirm the change only in a later utterance/);
+});
+
 test('named brief copies persist exactly and cannot overwrite built-ins or saved templates', () => {
   const entries = new Map<string, string>();
   const storage = {

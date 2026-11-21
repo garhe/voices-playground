@@ -26,6 +26,7 @@ Write 4 agent utterances per call, in this order:
 * **Utterances 00005–00008 (Call 2 — Banking & Finance):** Blocked card abroad, unrecognized charge dispute, or wire transfer delay. Verify **Full Phone Number** + **Transaction Date**.
 * **Utterances 00009–00012 (Call 3 — Delivery & Logistics):** Delayed/misdelivered parcel or delivery time-slot reschedule. Verify **Customer Name** + **Delivery Street Address** + **Delivery Date**.
 * **Utterances 00013–00016 (Call 4 — Flight & Hotel Travel):** Rebook a flight or adjust a hotel booking after a flight change. State both endpoints as the localized city name, then its uppercase 3-letter code in parentheses: Da Nang (DAD) to Incheon (ICN). Never say a bare code. Vary the route. Verify **Customer Name** + **Travel/Check-in Date** + **Phone Number**.
+  In both scenarios, read back the revised itinerary in natural speech: the airline name, a plausible flight number with that airline's designator, and the departure and arrival dates and times in each airport's local time. Make the timing plausible for the route and say the arrival date explicitly, especially if it changes overnight. Keep the dates consistent with any hotel change. Present a proposed option before asking for approval and confirm the change only in a later utterance.
 
 For each locale and run, vary the incident, cause, and resolution within each domain. Vary case-specific nouns (devices, merchants, parcels, routes). Don't translate or recycle a script by just swapping names.
 
