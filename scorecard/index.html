@@ -414,6 +414,11 @@ main { max-width: none; padding-bottom: 8px; }
 .multi-filter-popup { position: fixed; inset: auto; margin: 0; overflow: auto; padding: 6px; border: 1px solid var(--mica-border); border-radius: 8px; background: rgb(var(--theme-surface-rgb)); color: var(--mica-text); box-shadow: var(--mica-flyout-shadow); }
 .multi-filter-popup label { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 5px 8px; overflow-wrap: anywhere; cursor: pointer; }
 .multi-filter-popup label:hover { background: var(--mica-hover); color: var(--mica-hover-text); }
+.multi-filter-popup .multi-filter-all { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: start; }
+.multi-filter-popup .multi-filter-all::before { content: ''; inline-size: 1em; flex: none; text-align: center; }
+.multi-filter-popup .multi-filter-all[aria-pressed=true] { background: var(--mica-selected); color: var(--mica-text); font-weight: 650; }
+.multi-filter-popup .multi-filter-all[aria-pressed=true]::before { content: '\2713'; }
+.multi-filter-popup .multi-filter-all:enabled:hover { background: var(--mica-hover); color: var(--mica-hover-text); }
 .multi-filter-popup input[type=search] { width: 100%; }
 .filter-bar .date-control input { padding-right: 44px; }
 .filter-bar--single { width: 100%; max-width: 24rem; }
@@ -998,7 +1003,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   }
 }
 
-:root{--theme-color:#91ad59;--theme-accent:rgb(100, 119, 62);--theme-accent-hover:rgb(68, 81, 42);--theme-row-hover:rgb(205, 211, 193);--theme-heading:rgb(55, 65, 34);--theme-text:rgb(50, 60, 31);--theme-muted:rgb(58, 69, 36);--theme-page:rgb(239, 244, 227);--theme-glow:rgb(167, 189, 122);--theme-glow-soft:rgb(244, 225, 156);--theme-glow-third:rgb(241, 202, 199);--theme-card-wash:linear-gradient(125deg, rgb(220, 229, 202), rgb(252, 246, 226));--theme-panel-wash:linear-gradient(135deg, rgb(250, 240, 206), rgb(251, 240, 239));--theme-recordings-wash:linear-gradient(125deg, rgb(249, 230, 228), rgb(244, 247, 235));--theme-sidebar-wash:radial-gradient(ellipse 125% 44% at 31% 10%, rgb(91, 89, 80) 0%, transparent 100%), radial-gradient(ellipse 152% 31% at 61% 34%, rgb(84, 91, 67) 0%, transparent 100%), radial-gradient(ellipse 92% 29% at 78% 45%, rgb(78, 93, 49) 0%, transparent 100%), radial-gradient(ellipse 143% 42% at 68% 71%, rgb(96, 86, 49) 0%, transparent 100%), radial-gradient(ellipse 135% 44% at 89% 97%, rgb(106, 83, 81) 0%, transparent 100%), linear-gradient(#4e5d31, #4e5d31);--theme-sidebar-selected:radial-gradient(ellipse 51% 154% at 15% 20%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 62% 154% at 24% 37%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 50% 147% at 47% 7%, rgb(211, 222, 189) 0%, transparent 100%), radial-gradient(ellipse 48% 117% at 65% 94%, rgb(249, 239, 203) 0%, transparent 100%), radial-gradient(ellipse 68% 110% at 94% 37%, rgb(251, 248, 238) 0%, transparent 100%), #f5f7f8;--theme-sidebar-hover:radial-gradient(ellipse 73% 105% at 11% 11%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 56% 118% at 34% 48%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 67% 142% at 57% 66%, rgb(249, 239, 203) 0%, transparent 100%), radial-gradient(ellipse 49% 146% at 72% 58%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 56% 159% at 93% 93%, rgb(216, 226, 197) 0%, transparent 100%), #f5f7f8;--theme-sidebar-ink:rgb(39, 47, 25);--theme-sidebar-marker:rgb(246, 238, 213);--theme-workspace-hover:radial-gradient(ellipse 43% 109% at 17% 80%, rgb(130, 117, 67) 0%, transparent 100%), radial-gradient(ellipse 52% 150% at 29% 55%, rgb(136, 106, 104) 0%, transparent 100%), radial-gradient(ellipse 47% 83% at 46% 64%, rgb(100, 119, 62) 0%, transparent 100%), radial-gradient(ellipse 43% 114% at 63% 72%, rgb(117, 114, 102) 0%, transparent 100%), radial-gradient(ellipse 74% 117% at 86% 45%, rgb(107, 117, 85) 0%, transparent 100%), #64773e;--theme-surface-rgb:249, 251, 245;--theme-glass-rgb:206, 218, 200;--theme-panel-rgb:249, 239, 203;--theme-sidebar-rgb:78, 93, 49;--theme-inset-rgb:254, 253, 250;--theme-selected:rgb(250, 235, 234);--theme-header:rgb(252, 247, 229);--theme-border:rgba(100, 119, 62, .25);--theme-scrollbar:rgb(170, 180, 149)}</style>
+:root{--theme-color:#91ad59;--theme-accent:rgb(100, 119, 62);--theme-accent-hover:rgb(68, 81, 42);--theme-row-hover:rgb(205, 211, 193);--theme-heading:rgb(55, 65, 34);--theme-text:rgb(50, 60, 31);--theme-muted:rgb(58, 69, 36);--theme-page:rgb(239, 244, 227);--theme-glow:rgb(167, 189, 122);--theme-glow-soft:rgb(244, 225, 156);--theme-glow-third:rgb(241, 202, 199);--theme-card-wash:linear-gradient(125deg, rgb(220, 229, 202), rgb(252, 246, 226));--theme-panel-wash:linear-gradient(135deg, rgb(250, 240, 206), rgb(251, 240, 239));--theme-recordings-wash:linear-gradient(125deg, rgb(249, 230, 228), rgb(244, 247, 235));--theme-sidebar-wash:radial-gradient(ellipse 91% 38% at 12% 12%, rgb(91, 89, 80) 0%, transparent 100%), radial-gradient(ellipse 153% 41% at 46% 24%, rgb(96, 86, 49) 0%, transparent 100%), radial-gradient(ellipse 99% 26% at 7% 43%, rgb(78, 93, 49) 0%, transparent 100%), radial-gradient(ellipse 112% 26% at 80% 67%, rgb(84, 91, 67) 0%, transparent 100%), radial-gradient(ellipse 128% 40% at 56% 97%, rgb(106, 83, 81) 0%, transparent 100%), linear-gradient(#4e5d31, #4e5d31);--theme-sidebar-selected:radial-gradient(ellipse 67% 129% at 8% 67%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 66% 105% at 28% 14%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 62% 113% at 57% 32%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 69% 92% at 73% 48%, rgb(249, 239, 203) 0%, transparent 100%), radial-gradient(ellipse 42% 150% at 96% 67%, rgb(211, 222, 189) 0%, transparent 100%), #f5f7f8;--theme-sidebar-hover:radial-gradient(ellipse 63% 148% at 11% 45%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 71% 121% at 24% 89%, rgb(216, 226, 197) 0%, transparent 100%), radial-gradient(ellipse 45% 84% at 55% 69%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 66% 111% at 77% 95%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 58% 88% at 83% 10%, rgb(249, 239, 203) 0%, transparent 100%), #f5f7f8;--theme-sidebar-ink:rgb(39, 47, 25);--theme-sidebar-marker:rgb(246, 238, 213);--theme-workspace-hover:radial-gradient(ellipse 62% 118% at 10% 38%, rgb(130, 117, 67) 0%, transparent 100%), radial-gradient(ellipse 63% 114% at 32% 61%, rgb(100, 119, 62) 0%, transparent 100%), radial-gradient(ellipse 69% 83% at 50% 40%, rgb(117, 114, 102) 0%, transparent 100%), radial-gradient(ellipse 61% 158% at 67% 32%, rgb(107, 117, 85) 0%, transparent 100%), radial-gradient(ellipse 56% 109% at 95% 70%, rgb(136, 106, 104) 0%, transparent 100%), #64773e;--theme-surface-rgb:249, 251, 245;--theme-glass-rgb:206, 218, 200;--theme-panel-rgb:249, 239, 203;--theme-sidebar-rgb:78, 93, 49;--theme-inset-rgb:254, 253, 250;--theme-selected:rgb(250, 235, 234);--theme-header:rgb(252, 247, 229);--theme-border:rgba(100, 119, 62, .25);--theme-scrollbar:rgb(170, 180, 149)}</style>
   <style>
     .shared-scorecard .nav { text-decoration: none; }
     .shared-scorecard .sidebar-foot { margin-top: auto; }
@@ -1342,7 +1347,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
       const value = trigger.querySelector('.filter-value');
       value.textContent = count === 1 ? [...selected.get(key)][0] : count ? `${count} selected` : allLabels[key];
       value.title = value.textContent;
-      clear.disabled = !count;
+      clear.setAttribute('aria-pressed', String(!count));
     }
     byId('matches').textContent = `${rows.length} of ${data.cells.length} tested combinations`;
     renderMatrix(rows);
@@ -1380,8 +1385,12 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     trigger.append(el('span', null, { class: 'filter-value', id: `filter-value-${key}` }), el('span', '▾', { 'aria-hidden': 'true' }));
     const popup = el('div', null, { id: popupId, class: 'multi-filter-popup', popover: 'auto',
       role: 'group', 'aria-labelledby': `filter-label-${key}` });
-    const clear = el('button', allLabels[key], { class: 'text-button', type: 'button' });
-    clear.addEventListener('click', () => { clearFilter(key); render(); });
+    const clear = el('button', allLabels[key], { class: 'multi-filter-all', type: 'button' });
+    clear.addEventListener('click', () => {
+      if (!selected.get(key).size) return;
+      clearFilter(key);
+      render();
+    });
     selected.set(key, new Set());
     filters.set(key, { trigger, popup, clear });
     const values = unique(data.cells.map(cell => cell[key]));
