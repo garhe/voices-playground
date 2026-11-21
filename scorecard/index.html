@@ -1021,7 +1021,6 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     .voice-search { display: flex; align-items: end; flex-wrap: wrap; gap: .5rem 1rem; }
     .voice-search label { flex: 1 1 16rem; max-width: 28rem; }
     .voice-search input { width: 100%; }
-    .voice-search a { color: inherit; padding-block: .35rem; }
     #issue-groups { display: grid; gap: .5rem; }
     .issue-voice, .issue-domain, .issue-locale { border: 1px solid var(--mica-border); border-radius: 8px; overflow-wrap: anywhere; }
     .issue-voice, .issue-locale { background: var(--mica-inset); }
@@ -1072,7 +1071,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   <p id="mixed" class="hint" hidden>This snapshot combines different judging panels, rubrics, or guides. Treat these scores as descriptive, not a controlled head-to-head comparison.</p>
   <section id="controls" class="card arena-card" aria-labelledby="filters-heading">
     <h2 id="filters-heading">Voice × language / accent</h2>
-    <div class="voice-search"><label for="voice-search">Search by voice<input id="voice-search" type="search" placeholder="e.g. Mariela or en-US"></label><a href="#issues">Jump to TTS issues</a></div>
+    <div class="voice-search"><label for="voice-search">Search by voice<input id="voice-search" type="search" placeholder="e.g. Mariela or en-US"></label></div>
     <p class="hint">Search and filters apply to all sections. Use the Voice menu to select multiple voices by name.</p>
     <div id="filters" class="field-row filter-bar"></div>
     <div class="section-with-action"><span id="matches" class="hint" role="status"></span><button id="reset" class="text-button" type="button">Reset filters</button></div>
