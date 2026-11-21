@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { expressionTagListsSchema } from './scriptExpressionTags.js';
 import { parseAzureEndpoint } from './azure.js';
 import { studioLocaleCodeSchema } from './studio.js';
 
@@ -59,6 +60,8 @@ export const scriptGenerationSchema = z.object({
   speakers: speakerCountSchema,
   utteranceCount: z.number().int().min(1).max(MAX_SCRIPT_UTTERANCES),
   prompt: briefSchema,
+  expressionTags: z.boolean().optional(),
+  expressionTagLists: expressionTagListsSchema.optional(),
   consent: z.literal(true),
 }).strict().refine(value => value.utteranceCount >= value.speakers, 'Provide at least one utterance per speaker.');
 export type ScriptGenerationRequest = z.infer<typeof scriptGenerationSchema>;

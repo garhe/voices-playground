@@ -4,7 +4,7 @@ import {
 } from '../shared/scriptGeneration';
 
 type LocaleResult = ScriptGenerationResult[number];
-const resultLocale = (result: LocaleResult) => 'script' in result ? result.script.locale : result.locale;
+export const resultLocale = (result: LocaleResult) => 'script' in result ? result.script.locale : result.locale;
 const canRetry = (result: LocaleResult) => 'error' in result && result.retryAfterMs !== undefined;
 
 export async function generateScriptPreview(
@@ -62,15 +62,20 @@ export async function generateScriptPreview(
 export type ScriptRetryProgress = { generated: number; failed: number; retrying: number; nextRetryMs?: number };
 
 export async function regenerateLocalePreview(
-  input: ScriptGenerationRequest, results: ScriptGenerationResult, locale: string, signal: AbortSignal,
-): Promise<ScriptGenerationResult> {
-  const matchesLocale = (result: LocaleResult) => resultLocale(result).toLowerCase() === locale.toLowerCase();
-  if (!results.some(matchesLocale)) throw new Error('That locale is not in the preview.');
+  input: ScriptGenerationRequest, locale: string, signal: AbortSignal,
+): Promise<Extract<LocaleResult, { script: unknown }>> {
+  if (!input.locales.some(code => code.toLowerCase() === locale.toLowerCase())) throw new Error('That locale is not in the preview.');
   signal.throwIfAborted();
   const [replacement] = await generateScriptPreview({ ...input, locales: [locale] }, () => {}, signal);
   signal.throwIfAborted();
   if ('error' in replacement) throw new Error(replacement.error);
-  return results.map(result => matchesLocale(result) ? replacement : result);
+  return replacement;
+}
+
+export function mergeBatchResults(current: ScriptGenerationResult, batch: ScriptGenerationResult): ScriptGenerationResult {
+  // Completed locales are never retried by the batch; keep any newer manual replacements.
+  const completed = new Map(current.filter(result => 'script' in result).map(result => [resultLocale(result), result]));
+  return batch.map(result => completed.get(resultLocale(result)) ?? result);
 }
 
 function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {

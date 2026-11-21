@@ -18,7 +18,6 @@
 .arena-recording-window{margin:16px 0;padding:14px;border:1px solid var(--scrollbar-thumb);border-radius:8px}
 .script-generation-card,.script-generation-card fieldset{display:grid;gap:12px;min-width:0}
 .script-generation-card fieldset{border:0;margin:0;padding:0}
-.script-generation-card legend{font-weight:650;margin-bottom:8px;padding:0}
 .script-generation-card h2,.script-generation-card p,.script-generation-card .field-row,.script-generation-card .button-row{margin:0}
 .script-generation-card>button{justify-self:start}
 .workspace-nav{flex-shrink:0}
@@ -37,7 +36,11 @@
 .script-preview summary{cursor:pointer}
 .script-preview pre{max-height:280px;overflow:auto;white-space:pre-wrap;tab-size:4}
 .script-save-results{margin:0;padding-left:22px;overflow-wrap:anywhere}
+.script-tag-editor{display:grid;gap:12px;margin-block-start:12px;min-width:0}
+.script-tag-editor>.text-button{justify-self:start}
+.script-tag-rules{display:grid;gap:6px;margin:0;border-block-start:1px solid var(--mica-border);padding-block-start:12px;padding-inline:1.25rem 0}
 .studio-card>p,.studio-card h2,.studio-card h3{margin:0}
+.script-locale-issue,.script-locale-actions{display:grid;gap:8px}
 .studio-card .field-row{align-items:end}
 .studio-entry,.studio-plan{border-top:1px solid var(--mica-border);padding-top:16px;display:grid;gap:12px;min-width:0}
 .studio-entry ul{max-height:220px;overflow:auto;overflow-wrap:anywhere}
@@ -419,7 +422,7 @@ main { max-width: none; padding-bottom: 8px; }
 .filter-bar.script-brief-controls { display: flex; flex-wrap: wrap; align-items: flex-start; }
 .script-brief-controls > * { flex: 0 1 min(100%, 9rem); min-width: 0; }
 .script-brief-controls > :first-child, .script-brief-controls > .script-brief-style { flex-basis: min(100%, 15rem); }
-.script-brief-style label { gap: 4px; }
+.script-brief-controls > .script-brief-style { gap: 4px; }
 .script-brief-controls select { width: 100%; text-overflow: ellipsis; }
 .script-template-save-group { display: grid; gap: 4px; min-width: 0; }
 .button-row.script-template-save { align-items: flex-end; }
