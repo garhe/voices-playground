@@ -6,7 +6,7 @@ import {
   foundryResponsesEndpointSchema, hasScriptSpeakers, MAX_SCRIPT_BRIEF_LENGTH, scriptBriefImprovementSchema, scriptBriefSuggestionSchema,
   scriptDeploymentSchema, scriptExportSchema, scriptFileName, scriptFileText,
   SCRIPT_PROGRESS_CONTENT_TYPE, scriptGenerationSchema, scriptSettingsSchema, scriptUtterancesSchema, type GeneratedScript, type ScriptDeploymentSettings, type ScriptExportResult,
-  type ScriptGenerationRequest, type ScriptGenerationResult,
+  type ScriptGenerationRequest, type ScriptGenerationResult, type ScriptGenerationStatus,
 } from '../shared/scriptGeneration.js';
 import { CALM_TAG_LIMIT, DEFAULT_EXPRESSION_TAG_LISTS, expressionTagRules } from '../shared/scriptExpressionTags.js';
 import { studioLocaleOptions } from '../shared/studioVoices.js';
@@ -14,6 +14,7 @@ import { protectKey, type Connection, type Credentials } from './credentials.js'
 import { realDirectory } from './localDirectory.js';
 import type { Store } from './store.js';
 import type { AzureVoicesStudio } from './studio.js';
+import { ScriptGenerationRuns } from './scriptGenerationRun.js';
 
 const settingsFile = 'script-generation-settings.json';
 const storedSettingsSchema = z.object({
@@ -215,7 +216,7 @@ async function generateLocale(
     'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
     'Use fictional examples and no real personal or sensitive details.',
     'If an utterance asks a question, the question must be its final sentence: never ask and then keep speaking in the same utterance, because the listener must answer first. Continue in the next utterance.',
-    'Whenever you mention an airport code, write it as an uppercase 3-letter code in parentheses right after the city or airport name, for example Da Nang (DAD) to Incheon (ICN); never write a bare code.',
+    'Whenever you mention an airport code, give the specific airport name as spoken locally, then its matching uppercase 3-letter IATA code in parentheses, for example Hanoi Noi Bai (HAN) to Tokyo Narita (NRT). Use the airport name, not just its city, and never write a bare code.',
   ].join(' '), {
     locale: locale.label,
     style: request.style,
@@ -306,9 +307,53 @@ export function registerScriptGeneration(app: Express, {
   app.get('/api/script-generation/locales', async (req, res) => res.json(await locales(req.query.refresh === '1')));
 
   let textRequestRunning = false;
+  async function prepare(input: ScriptGenerationRequest) {
+    const credentials = await textConnection();
+    const catalog = new Map((await locales()).map(option => [option.value.toLowerCase(), option]));
+    const selected = input.locales.map(code => {
+      const locale = catalog.get(code.toLowerCase());
+      if (!locale) throw new Error(`${code} is not in the current Azure Speech voice catalog. Refresh locales and update the selection.`);
+      return locale;
+    });
+    return {
+      locales: selected,
+      generate: (locale: typeof selected[number], signal: AbortSignal) =>
+        generateLocale(fetchText, credentials, input, locale, signal),
+    };
+  }
+  const runs = new ScriptGenerationRuns(prepare, error => connection.redact(error),
+    error => error instanceof RetryableScriptError ? error.retryAfterMs : undefined);
+  const status = (): ScriptGenerationStatus => ({ run: runs.current, textBusy: textRequestRunning });
+  const runRoute = '/api/script-generation/run';
+  const actionSchema = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('pause'), id: z.string().uuid() }).strict(),
+    z.object({ action: z.literal('resume'), id: z.string().uuid() }).strict(),
+    z.object({ action: z.literal('restart'), id: z.string().uuid() }).strict(),
+    z.object({ action: z.literal('regenerate'), id: z.string().uuid(), locale: z.string() }).strict(),
+    z.object({ action: z.literal('stop-regeneration'), id: z.string().uuid() }).strict(),
+  ]);
+  app.get(runRoute, (_req, res) => res.json(status()));
+  app.post(runRoute, (req, res) => {
+    const input = scriptGenerationSchema.parse(req.body);
+    if (runs.active || textRequestRunning) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
+    runs.start(input);
+    res.status(202).json(status());
+  });
+  app.post(`${runRoute}/action`, (req, res) => {
+    const action = actionSchema.parse(req.body);
+    const run = runs.current;
+    if (!run || run.id !== action.id) { res.status(409).json({ error: 'This generation run is no longer current.' }); return; }
+    if (action.action === 'pause' && run.state === 'running') runs.pause(run);
+    else if (action.action === 'resume' && !runs.active && !textRequestRunning && (run.state === 'paused' || run.state === 'failed')) runs.resume(run);
+    else if (action.action === 'restart' && !runs.active && !textRequestRunning) runs.start(run.input);
+    else if (action.action === 'stop-regeneration' && run.regeneration?.state === 'running') runs.stopRegeneration();
+    else if (action.action === 'regenerate' && !textRequestRunning && runs.canRegenerate(run, action.locale)) runs.regenerate(run, action.locale);
+    else { res.status(409).json({ error: 'That action is not available in the current generation state.' }); return; }
+    res.json(status());
+  });
   app.post('/api/script-generation/improve-brief', async (req, res) => {
     const input = scriptBriefImprovementSchema.parse(req.body);
-    if (textRequestRunning) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
+    if (textRequestRunning || runs.active) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
     textRequestRunning = true;
     const controller = new AbortController();
     const cancel = () => controller.abort();
@@ -333,19 +378,13 @@ export function registerScriptGeneration(app: Express, {
 
   app.post('/api/script-generation/generate', async (req, res) => {
     const input = scriptGenerationSchema.parse(req.body);
-    if (textRequestRunning) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
+    if (textRequestRunning || runs.active) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
     textRequestRunning = true;
     const controller = new AbortController();
     const cancel = () => controller.abort();
     res.once('close', cancel);
     try {
-      const credentials = await textConnection();
-      const catalog = new Map((await locales()).map(option => [option.value.toLowerCase(), option]));
-      const selected = input.locales.map(code => {
-        const locale = catalog.get(code.toLowerCase());
-        if (!locale) throw new Error(`${code} is not in the current Azure Speech voice catalog. Refresh locales and update the selection.`);
-        return locale;
-      });
+      const { locales: selected, generate } = await prepare(input);
       if (controller.signal.aborted) return;
       const stream = req.get('Accept') === SCRIPT_PROGRESS_CONTENT_TYPE;
       if (stream) {
@@ -356,7 +395,7 @@ export function registerScriptGeneration(app: Express, {
       for (let index = 0; index < selected.length && !controller.signal.aborted; index += 3) {
         results.push(...await Promise.all(selected.slice(index, index + 3).map(async locale => {
           let result: ScriptGenerationResult[number];
-          try { result = { script: await generateLocale(fetchText, credentials, input, locale, controller.signal) }; }
+          try { result = { script: await generate(locale, controller.signal) }; }
           catch (error) {
             result = { locale: locale.value, error: connection.redact(error),
               ...(stream && error instanceof RetryableScriptError ? { retryAfterMs: error.retryAfterMs } : {}) };

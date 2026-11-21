@@ -82,6 +82,18 @@ export const scriptLocaleResultSchema = z.union([
 ]);
 export const scriptGenerationResultSchema = z.array(scriptLocaleResultSchema);
 export type ScriptGenerationResult = z.infer<typeof scriptGenerationResultSchema>;
+export type ScriptGenerationRun = {
+  id: string;
+  input: ScriptGenerationRequest;
+  state: 'running' | 'pausing' | 'paused' | 'completed' | 'failed';
+  results: ScriptGenerationResult;
+  activeLocales: string[];
+  firstLocale?: string;
+  retryAt?: number;
+  error?: string;
+  regeneration?: { locale: string; state: 'running' | 'done' | 'error'; message: string };
+};
+export type ScriptGenerationStatus = { run?: ScriptGenerationRun; textBusy: boolean };
 
 export const scriptExportSchema = z.object({
   directory: z.string().trim().min(1, 'Enter a destination folder.').max(2048),

@@ -11,7 +11,7 @@ import { createApp } from '../server/app.js';
 import { bareAirportCodes, continuesAfterQuestion } from '../server/scriptGeneration.js';
 import { parseStudioScript } from '../server/studioScripts.js';
 import { expressionTagListsSchema, type ExpressionTagLists } from '../shared/scriptExpressionTags.js';
-import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptGenerationResult } from '../shared/scriptGeneration.js';
+import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptGenerationResult, type ScriptGenerationStatus } from '../shared/scriptGeneration.js';
 import { generateScriptPreview, generateScriptsWithRetry, mergeBatchResults, regenerateLocalePreview } from '../src/scriptGenerationProgress.js';
 import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief } from '../src/scriptBriefTemplates.js';
 import { BUILT_IN_BRIEF_TEMPLATES, DEFAULT_SCRIPT_BRIEF, DEFAULT_SCRIPT_LOCALES, extractScriptStyle, ScriptGeneration } from '../src/ScriptGeneration.js';
@@ -45,7 +45,6 @@ test('default content brief keeps tag rules separate and requires hesitations in
   assert.match(delivery, /Mix in English words or acronyms where locals naturally do/);
   assert.match(delivery, /Prefer local equivalents when they sound more natural\. No term is mandatory\./);
   assert.doesNotMatch(delivery, /zh-HK|literal word/);
-  assert.match(prompt, /00013–00016 \(Call 4 — Flight &amp; Hotel Travel\)[^\r\n]*both endpoints as the localized city name, then its uppercase 3-letter code in parentheses: Da Nang \(DAD\) to Incheon \(ICN\)\. Never say a bare code\./);
   assert.match(prompt, /End any utterance at the question\./);
   assert.match(prompt, /without asterisks; parentheses only for airport codes\./);
   assert.match(html, /Script style<input[^>]*value="Customer_Services"/);
@@ -73,6 +72,9 @@ test('both travel scenarios request a complete revised flight itinerary and wait
   const travel = DEFAULT_SCRIPT_BRIEF.split('Call 4 — Flight & Hotel Travel')[1]?.split('\n\n')[0];
   assert.ok(travel);
   assert.match(travel, /Rebook a flight or adjust a hotel booking after a flight change/);
+  assert.match(travel, /each endpoint's specific airport name as spoken locally/);
+  assert.match(travel, /matching uppercase 3-letter IATA code in parentheses: Hanoi Noi Bai \(HAN\) to Tokyo Narita \(NRT\)/);
+  assert.match(travel, /Do not use a city alone, such as Tokyo \(NRT\), or a bare code/);
   assert.match(travel, /In both scenarios, read back the revised itinerary in natural speech/);
   assert.match(travel, /airline name, a plausible flight number with that airline's designator/);
   assert.match(travel, /departure and arrival dates and times in each airport's local time/);
@@ -245,6 +247,8 @@ test('generates on the configured Azure connection, reports failed locales, and 
   const primaryLocales = ['en-US', 'en-GB', 'en-AU', 'en-CA', 'en-NZ', 'en-IN', 'en-IE', 'en-ZA', 'fr-FR', 'fr-CA', 'de-DE'];
   let releaseSlowLocale: (() => void) | undefined;
   const slowLocale = new Promise<void>(resolve => { releaseSlowLocale = resolve; });
+  let releaseRunLocale: (() => void) | undefined;
+  const slowRunLocale = new Promise<void>(resolve => { releaseRunLocale = resolve; });
   let catalogCalls = 0;
   const speechFetch: typeof fetch = async input => {
     assert.equal(String(input), 'https://eastus.tts.speech.microsoft.com/cognitiveservices/voices/list');
@@ -289,6 +293,7 @@ test('generates on the configured Azure connection, reports failed locales, and 
     }
     calls.push({ model: body.model, instructions: body.messages[0].content, ...spec });
     if (spec.contentBrief === 'Check live progress.' && spec.locale.includes('en-US')) await slowLocale;
+    if (spec.contentBrief === 'Check reconnectable run.' && spec.locale.includes('en-US')) await slowRunLocale;
     if (spec.locale.includes('es-MX')) return new Response(null, { status: 429, headers: { 'Retry-After': '8' } });
     const recovering = spec.contentBrief === 'Retry invalid output.';
     if (recovering && spec.locale.includes('en-GB')) return new Response(null, { status: 403 });
@@ -382,6 +387,7 @@ test('generates on the configured Azure connection, reports failed locales, and 
     assert.equal(taggedPodcast.script.utterances[0].text, customOutput);
     const podcastCall = calls.find(call => call.contentBrief === podcastBrief);
     assert.match(podcastCall?.instructions ?? '', /Expression tags are ON.*exactly 1 emotion\/style tag.*whispering/);
+    assert.match(podcastCall?.instructions ?? '', /specific airport name as spoken locally.*Tokyo Narita \(NRT\).*not just its city/);
     assert.match(podcastCall?.instructions ?? '', /\[laughter\], \[coughing\], \[throat_clearing\], \[breathing\], \[sighing\], \[yawning\]/);
     customOutput = '[excited] [reassuring] Welcome to the show.';
     const [duplicateTag] = await generateWithTags(podcastBrief, true);
@@ -497,6 +503,57 @@ test('generates on the configured Azure connection, reports failed locales, and 
   } finally {
     releaseSlowLocale?.();
     progressFetch.mock.restore();
+  }
+
+  const getRun = async () => ((await (await fetch(`${url}run`)).json()) as ScriptGenerationStatus).run;
+  async function waitForRun(predicate: (run: NonNullable<Awaited<ReturnType<typeof getRun>>>) => boolean) {
+    for (let count = 0; count < 100; count++) {
+      const run = await getRun();
+      if (run && predicate(run)) return run;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail('The run did not reach the expected state.');
+  }
+  const runInput = { ...brief, locales: ['en-US', 'fr-FR', 'en-GB', 'en-AU'], prompt: 'Check reconnectable run.' };
+  const runCalls = () => calls.filter(call => call.contentBrief === runInput.prompt);
+  try {
+    assert.equal(await getRun(), undefined);
+    assert.equal((await post('run', runInput)).status, 202);
+    const running = await waitForRun(run => run.activeLocales.includes('en-US') && run.results.length === 2);
+    const action = (name: string, extra: object = {}) => post('run/action', { action: name, id: running.id, ...extra });
+    assert.equal(running.state, 'running');
+    assert.equal((await post('run', runInput)).status, 409);
+    assert.equal((await action('regenerate', { locale: 'fr-FR' })).status, 200);
+    await waitForRun(run => run.regeneration?.state === 'done');
+    assert.equal((await action('pause')).status, 200);
+    assert.equal((await getRun())?.state, 'pausing');
+    releaseRunLocale?.();
+    const paused = await waitForRun(run => run.state === 'paused');
+    assert.equal(paused.id, running.id);
+    assert.equal(paused.results.length, 3);
+    assert.deepEqual(paused.activeLocales, []);
+    assert.equal(runCalls().some(call => call.locale.includes('en-AU')), false);
+    assert.equal((await action('resume')).status, 200);
+    const completedRun = await waitForRun(run => run.state === 'completed');
+    assert.equal(completedRun.id, running.id);
+    assert.equal(completedRun.results.length, 4);
+    assert.equal(runCalls().length, 5);
+    assert.equal((await action('restart')).status, 200);
+    const restarted = await waitForRun(run => run.id !== running.id && run.state === 'completed');
+    assert.deepEqual(restarted.input, scriptGenerationSchema.parse(runInput));
+    assert.equal(runCalls().length, 9);
+    assert.equal((await action('restart')).status, 409);
+
+    assert.equal((await post('run', { ...brief, locales: ['en-US', 'es-MX'], prompt: 'Pause server retry.' })).status, 202);
+    const waiting = await waitForRun(run => run.retryAt !== undefined);
+    assert.equal(waiting.results.length, 2);
+    assert.equal((await post('run/action', { action: 'pause', id: waiting.id })).status, 200);
+    const pausedRetry = await getRun();
+    assert.equal(pausedRetry?.state, 'paused');
+    assert.equal(pausedRetry?.retryAt, undefined);
+    assert.deepEqual(pausedRetry?.results, waiting.results);
+  } finally {
+    releaseRunLocale?.();
   }
 
   const english = { locale: 'en-US', utterances: [{ speaker: 1 as const, text: 'Hello.' }, { speaker: 2 as const, text: 'Hi.' }] };

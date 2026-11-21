@@ -4,11 +4,11 @@ import {
   MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, MAX_SCRIPT_UTTERANCES, SCRIPT_EXPORT_BATCH_SIZE,
   scriptBriefImprovementSchema, scriptBriefSuggestionSchema, scriptExportSchema,
   scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptExportResult,
-  type ScriptGenerationRequest, type ScriptGenerationResult, type ScriptLocaleOption,
+  type ScriptGenerationRequest, type ScriptGenerationStatus, type ScriptLocaleOption,
 } from '../shared/scriptGeneration';
 import { studioLocaleLabel } from '../shared/studioVoices';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
-import { generateScriptsWithRetry, mergeBatchResults, regenerateLocalePreview, resultLocale, type ScriptRetryProgress } from './scriptGenerationProgress';
+import { resultLocale } from './scriptGenerationProgress';
 import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Unexpected script generation error.';
@@ -25,7 +25,7 @@ Write 4 agent utterances per call, in this order:
 * **Utterances 00001–00004 (Call 1 — Telecom):** Mobile roaming issue, eSIM activation, or home fiber outage. Verify **Customer Name** + **Billing/Service Address**.
 * **Utterances 00005–00008 (Call 2 — Banking & Finance):** Blocked card abroad, unrecognized charge dispute, or wire transfer delay. Verify **Full Phone Number** + **Transaction Date**.
 * **Utterances 00009–00012 (Call 3 — Delivery & Logistics):** Delayed/misdelivered parcel or delivery time-slot reschedule. Verify **Customer Name** + **Delivery Street Address** + **Delivery Date**.
-* **Utterances 00013–00016 (Call 4 — Flight & Hotel Travel):** Rebook a flight or adjust a hotel booking after a flight change. State both endpoints as the localized city name, then its uppercase 3-letter code in parentheses: Da Nang (DAD) to Incheon (ICN). Never say a bare code. Vary the route. Verify **Customer Name** + **Travel/Check-in Date** + **Phone Number**.
+* **Utterances 00013–00016 (Call 4 — Flight & Hotel Travel):** Rebook a flight or adjust a hotel booking after a flight change. Whenever reading back the route, give each endpoint's specific airport name as spoken locally, including the city when natural, then its matching uppercase 3-letter IATA code in parentheses: Hanoi Noi Bai (HAN) to Tokyo Narita (NRT). Do not use a city alone, such as Tokyo (NRT), or a bare code. Vary the route. Verify **Customer Name** + **Travel/Check-in Date** + **Phone Number**.
   In both scenarios, read back the revised itinerary in natural speech: the airline name, a plausible flight number with that airline's designator, and the departure and arrival dates and times in each airport's local time. Make the timing plausible for the route and say the arrival date explicitly, especially if it changes overnight. Keep the dates consistent with any hotel change. Present a proposed option before asking for approval and confirm the change only in a later utterance.
 
 For each locale and run, vary the incident, cause, and resolution within each domain. Vary case-specific nouns (devices, merchants, parcels, routes). Don't translate or recycle a script by just swapping names.
@@ -54,9 +54,7 @@ export function extractScriptStyle(brief: string): string {
     .split(/[.!?。！？](?:\s|$)|[。！？]/u, 1)[0];
   return style.slice(0, MAX_SCRIPT_STYLE_LENGTH).replace(/[\uD800-\uDBFF]$/, '').trim();
 }
-type Preview = {
-  revision: number; input: ScriptGenerationRequest; results: ScriptGenerationResult; firstLocale?: string;
-};
+const runPath = '/api/script-generation/run';
 
 export function ScriptGeneration({ request, active, connected, speechConfigured, deployment, onConfigure }: {
   request: AppRequest;
@@ -110,33 +108,54 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const [suggestion, setSuggestion] = useState('');
   const [improvementError, setImprovementError] = useState('');
   const [directory, setDirectory] = useState('');
-  const [preview, setPreview] = useState<Preview>();
+  const [runStatus, setRunStatus] = useState<ScriptGenerationStatus>();
+  const [statusError, setStatusError] = useState('');
+  const [commandPending, setCommandPending] = useState(false);
+  const command = useRef({ pending: false, revision: 0 });
+  const preview = runStatus?.run;
   const [saved, setSaved] = useState<ScriptExportResult>();
   const [generationError, setGenerationError] = useState('');
-  const generationRequest = useRef<AbortController>(undefined);
-  const regenerationRequest = useRef<AbortController>(undefined);
-  const generationRevision = useRef<number>(undefined);
-  const [generationProgress, setGenerationProgress] = useState<ScriptRetryProgress & { total: number }>(
-    { total: 0, generated: 0, failed: 0, retrying: 0 },
-  );
-  const [generationStopped, setGenerationStopped] = useState('');
-  useEffect(() => () => {
-    generationRequest.current?.abort();
-    regenerationRequest.current?.abort();
-  }, []);
   const [saveError, setSaveError] = useState('');
-  const [busy, setBusy] = useState<'improve' | 'generate' | 'save'>();
-  const [regeneration, setRegeneration] = useState<{ locale: string; state: 'running' | 'done' | 'error'; message: string }>();
+  const [busy, setBusy] = useState<'improve' | 'save'>();
+  const regeneration = preview?.regeneration;
   const isRegenerating = regeneration?.state === 'running';
   const scripts = preview?.results.flatMap(result => 'script' in result ? [result.script] : []) ?? [];
-  const previewIsGenerating = busy === 'generate' && preview?.revision === generationRevision.current;
-  const failedLocales = preview?.results.filter(result => 'error' in result &&
-    (!previewIsGenerating || result.retryAfterMs === undefined)).length ?? 0;
+  const previewIsGenerating = preview?.state === 'running' || preview?.state === 'pausing';
+  const failedLocales = preview?.results.filter(result => 'error' in result && result.retryAfterMs === undefined).length ?? 0;
   const options = catalog.filter(option => option.label.toLowerCase().includes(localeSearch.trim().toLowerCase()));
   const locales = selection ?? [];
   const readyToImprove = !!connected && !!deployment && !!prompt.trim();
   const readyToGenerate = !!connected && !!deployment && !!speechConfigured && !catalogLoading && !localeError;
-  const canRegenerate = readyToGenerate && !isRegenerating && (!busy || previewIsGenerating);
+  const unavailable = !runStatus || !!statusError || runStatus.textBusy || !!busy || commandPending;
+  const canRegenerate = !unavailable && readyToGenerate && !isRegenerating && preview?.state !== 'pausing';
+  const controlsDisabled = unavailable || previewIsGenerating || isRegenerating;
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (!command.current.pending) {
+        const revision = command.current.revision;
+        try {
+          const status = await request<ScriptGenerationStatus>(runPath, undefined, 'GET', controller.signal);
+          if (!controller.signal.aborted && revision === command.current.revision) {
+            setRunStatus(status);
+            setStatusError('');
+          }
+        } catch (error) {
+          if (!controller.signal.aborted && revision === command.current.revision) setStatusError(errorText(error));
+        }
+      }
+      if (!controller.signal.aborted) timer = setTimeout(() => void poll(), 1500);
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [active, request]);
+
+  useEffect(() => {
+    setSaved(undefined); setSaveError('');
+  }, [preview?.id, regeneration?.state]);
 
   const loadLocales = useCallback(async (refresh: boolean) => {
     catalogRequest.current?.abort();
@@ -199,7 +218,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   }
 
   async function improveBrief() {
-    if (!readyToImprove || busy || regenerationRequest.current) return;
+    if (!readyToImprove || controlsDisabled) return;
     clearImprovement();
     const input = scriptBriefImprovementSchema.safeParse({ prompt, style, speakers, consent: true });
     if (!input.success) { setImprovementError(input.error.issues[0].message); return; }
@@ -213,11 +232,24 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     finally { setBusy(undefined); }
   }
 
+  async function runCommand(url: string, payload: unknown) {
+    if (command.current.pending) return;
+    command.current.pending = true;
+    command.current.revision++;
+    setCommandPending(true);
+    setGenerationError('');
+    try { setRunStatus(await request<ScriptGenerationStatus>(url, payload)); }
+    catch (error) { setGenerationError(errorText(error)); }
+    finally {
+      command.current.pending = false;
+      setCommandPending(false);
+    }
+  }
+
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!readyToGenerate || busy || generationRequest.current || regenerationRequest.current) return;
+    if (!readyToGenerate || controlsDisabled) return;
     setGenerationError('');
-    setGenerationStopped('');
     if (expressionTags && !tagLists.success) {
       setGenerationError('Fix the tag lists before generating.');
       return;
@@ -228,73 +260,19 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       ...(expressionTags && tagLists.success ? { expressionTagLists: tagLists.data } : {}),
     });
     if (!input.success) { setGenerationError(input.error.issues[0].message); return; }
-    const total = input.data.locales.length;
-    const controller = new AbortController();
-    generationRequest.current = controller;
-    const revision = (preview?.revision ?? 0) + 1;
-    generationRevision.current = revision;
-    let results: ScriptGenerationResult = [];
-    let firstLocale: string | undefined;
-    setGenerationProgress({ total, generated: 0, failed: 0, retrying: 0 });
-    setBusy('generate');
-    try {
-      await generateScriptsWithRetry(input.data, controller.signal, (progress, latest) => {
-        if (controller.signal.aborted) return;
-        const firstUpdate = !results.length && latest.length > 0;
-        results = latest;
-        setGenerationProgress({ total, ...progress });
-        if (latest.length) {
-          firstLocale ??= latest.find(result => 'script' in result)?.script.locale;
-          const batchFirstLocale = firstLocale;
-          setPreview(current => ({
-            revision, input: input.data,
-            results: current?.revision === revision ? mergeBatchResults(current.results, latest) : latest,
-            firstLocale: (current?.revision === revision ? current.firstLocale : undefined) ?? batchFirstLocale,
-          }));
-        }
-        if (firstUpdate) {
-          setRegeneration(undefined);
-          setSaved(undefined); setSaveError('');
-        }
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
-        setGenerationStopped('Generation stopped. Completed previews are kept.');
-      } else setGenerationError(errorText(error));
-    } finally {
-      generationRequest.current = undefined;
-      setBusy(undefined);
-    }
+    if (preview?.state === 'paused' && !window.confirm('Replace the paused run and its previews with a new run using the current settings?')) return;
+    await runCommand(runPath, input.data);
   }
 
-  async function regenerate(locale: string) {
-    if (!preview || !canRegenerate || regenerationRequest.current) return;
-    const result = preview.results.find(item => resultLocale(item) === locale);
-    if (!result || (previewIsGenerating && 'error' in result && result.retryAfterMs !== undefined)) return;
-    const controller = new AbortController();
-    regenerationRequest.current = controller;
-    setRegeneration({ locale, state: 'running', message: 'Regenerating…' });
-    try {
-      const replacement = await regenerateLocalePreview(preview.input, locale, controller.signal);
-      setPreview(current => current?.revision === preview.revision ? {
-        ...current,
-        results: current.results.map(item => resultLocale(item) === locale ? replacement : item),
-        firstLocale: current.firstLocale ?? locale,
-      } : current);
-      setSaved(undefined); setSaveError('');
-      setRegeneration({ locale, state: 'done', message: 'Preview regenerated.' });
-    } catch (error) {
-      setRegeneration(controller.signal.aborted
-        ? { locale, state: 'done', message: 'Regeneration stopped. Preview unchanged.' }
-        : { locale, state: 'error', message: `Could not regenerate: ${errorText(error)} Preview unchanged.` });
-    } finally {
-      regenerationRequest.current = undefined;
-    }
+  function runAction(action: 'pause' | 'resume' | 'restart' | 'regenerate' | 'stop-regeneration', locale?: string) {
+    if (!preview || unavailable) return;
+    if (action === 'restart' && !window.confirm('Restart with the same settings? This replaces the current previews and makes new Azure requests.')) return;
+    void runCommand(`${runPath}/action`, { id: preview.id, action, ...(locale === undefined ? {} : { locale }) });
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!preview || busy || regenerationRequest.current) return;
+    if (!preview || controlsDisabled) return;
     setSaveError(''); setSaved(undefined);
     setBusy('save');
     const results: ScriptExportResult = [];
@@ -325,7 +303,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       <section className="card script-generation-card">
         <h2>01 · Script brief</h2>
         <p className="muted">Generate an original script for each selected language and accent. The app adds utterance IDs such as <code>en-US_00001</code> in the preview and export; don't request IDs in the brief.</p>
-        <fieldset disabled={!!busy || isRegenerating}>
+        <fieldset disabled={!!busy || previewIsGenerating || isRegenerating}>
           <div className="filter-bar script-brief-controls">
             <label>Content brief template<select value={selectedTemplate} onChange={event => chooseTemplate(event.target.value)}>
               {defaultBrief !== null && <option value="">My default brief</option>}
@@ -365,7 +343,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
             </div>
           </details>}
           <div className="button-row">
-            <button className="secondary" type="button" disabled={!readyToImprove || !!busy} onClick={() => void improveBrief()}>Improve with AI</button>
+            <button className="secondary" type="button" disabled={!readyToImprove || controlsDisabled} onClick={() => void improveBrief()}>Improve with AI</button>
             <small>Sends the brief, style and speaker count to Azure OpenAI in one request. Charges may apply.</small>
           </div>
           {busy === 'improve' && <p role="status">Improving your brief…</p>}
@@ -394,7 +372,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       </section>
       <section className="card script-generation-card" aria-labelledby={localesHeadingId}>
         <h2 id={localesHeadingId}>02 · Languages / Accents</h2>
-        <fieldset disabled={!!busy || isRegenerating} aria-labelledby={localesHeadingId}>
+        <fieldset disabled={!!busy || previewIsGenerating || isRegenerating} aria-labelledby={localesHeadingId}>
           <p className="muted">Locales come from the Azure TTS voice catalog for your configured Azure Speech resource.</p>
           <div className="button-row">
             <button className="secondary" type="button" disabled={catalogLoading || !catalog.length || locales.length === catalog.length}
@@ -415,16 +393,28 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         </fieldset>
         {deployment && <p className="muted">Text deployment: <strong>{deployment}</strong></p>}
         <div className="button-row">
-          <button className="primary" disabled={!!busy || isRegenerating || !readyToGenerate || !locales.length} type="submit">Generate preview</button>
-          {busy === 'generate' && <button className="secondary" type="button" onClick={() => generationRequest.current?.abort()}>Stop generation</button>}
-          <small>Retryable locales run until they succeed or you stop generation. Each Azure OpenAI attempt may incur charges.</small>
+          <button className="primary" disabled={controlsDisabled || !readyToGenerate || !locales.length} type="submit">Generate preview</button>
+          {preview?.state === 'running' && <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('pause')}>Pause</button>}
+          {(preview?.state === 'paused' || preview?.state === 'failed') &&
+            <button className="secondary" type="button" disabled={controlsDisabled} onClick={() => runAction('resume')}>Resume</button>}
+          {preview && !previewIsGenerating &&
+            <button className="secondary" type="button" disabled={controlsDisabled} onClick={() => runAction('restart')}>Restart</button>}
         </div>
-        {busy === 'generate' && <p role="status">Generating scripts… {generationProgress.generated}/{generationProgress.total} generated
-          {generationProgress.failed > 0 && ` · ${generationProgress.failed} failed`}
-          {generationProgress.retrying > 0 && (generationProgress.nextRetryMs === undefined
-            ? ` · ${generationProgress.retrying} retrying`
-            : ` · Retrying ${generationProgress.retrying} in ${Math.ceil(generationProgress.nextRetryMs / 1000)}s`)}</p>}
-        {generationStopped && <p role="status">{generationStopped}</p>}
+        <small>Generation continues across browser refreshes. Each Azure OpenAI attempt may incur charges.</small>
+        {!runStatus && !statusError && <p role="status">Checking generation status…</p>}
+        {runStatus?.textBusy && <p role="status">Another Azure text request is running.</p>}
+        {preview && <p role="status">{{
+          running: preview.retryAt ? 'Waiting to retry' : 'Generating scripts',
+          pausing: 'Pausing after the current requests finish',
+          paused: 'Paused',
+          completed: 'Run finished',
+          failed: 'Run interrupted',
+        }[preview.state]} · {scripts.length}/{preview.input.locales.length} generated
+          {failedLocales > 0 && ` · ${failedLocales} failed`}
+          {preview.activeLocales.length > 0 && ` · ${preview.activeLocales.map(locale => studioLocaleLabel(locale)).join(', ')}`}
+        </p>}
+        {statusError && <p className="error-text" role="alert">Could not check generation status: {statusError}</p>}
+        {preview?.error && <p className="error-text" role="alert">{preview.error}</p>}
         {generationError && <p className="error-text" role="alert">{generationError}</p>}
       </section>
     </form>
@@ -439,19 +429,20 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       {preview?.results.map(result => {
         const locale = resultLocale(result);
         const label = studioLocaleLabel(locale);
-        const isRetrying = previewIsGenerating && 'error' in result && result.retryAfterMs !== undefined;
+        const needsRetry = 'error' in result && result.retryAfterMs !== undefined;
+        const isRetrying = previewIsGenerating && needsRetry;
         const feedback = regeneration?.locale === locale ? regeneration : undefined;
         const actions = !isRetrying && <div className="script-locale-actions">
           <div className="button-row">
             {feedback?.state === 'running'
-              ? <button className="secondary" type="button" onClick={() => regenerationRequest.current?.abort()}>Stop regeneration</button>
+              ? <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('stop-regeneration')}>Stop regeneration</button>
               : <button className="secondary" type="button" disabled={!canRegenerate}
-                aria-label={`Regenerate ${label}`} onClick={() => void regenerate(locale)}>Regenerate</button>}
+                aria-label={`Regenerate ${label}`} onClick={() => runAction('regenerate', locale)}>Regenerate</button>}
           </div>
           {feedback && <p className={feedback.state === 'error' ? 'error-text' : 'muted'}
             role={feedback.state === 'error' ? 'alert' : 'status'}>{feedback.message}</p>}
         </div>;
-        const key = `${preview.revision}:${locale}`;
+        const key = `${preview.id}:${locale}`;
         return 'script' in result
           ? <details className="script-preview" key={key} open={locale === preview.firstLocale}>
             <summary>{scriptFileName(locale, preview.input.style)} · {result.script.utterances.length} utterances</summary>
@@ -459,16 +450,16 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
             {actions}
           </details>
           : <div className="script-preview script-locale-issue" key={key}>
-            <p><strong>{label}</strong> · <span role={isRetrying ? 'status' : undefined}>{isRetrying ? 'Retrying' : 'Not generated'}</span></p>
+            <p><strong>{label}</strong> · <span role={isRetrying ? 'status' : undefined}>{isRetrying ? 'Retrying' : needsRetry ? 'Retry pending' : 'Not generated'}</span></p>
             <p className={isRetrying ? 'muted' : 'error-text'}>{result.error}</p>
             {actions}
           </div>;
       })}
-      <label>Destination folder<input value={directory} disabled={!!busy || isRegenerating} maxLength={2048}
+      <label>Destination folder<input value={directory} disabled={controlsDisabled} maxLength={2048}
         onChange={event => { setDirectory(event.target.value); setSaved(undefined); setSaveError(''); }}
         placeholder="C:\Users\You\Documents\Scripts" required /></label>
       <p className="muted">Paste an existing local folder path. Filenames use the locale and script style, for example <code>en-US_Warm_documentary_narration.txt</code>. Each UTF-8 line contains an utterance filename, a tab, and spoken text. Existing files are not overwritten.</p>
-      <button className="primary" disabled={!!busy || isRegenerating || !scripts.length || !directory.trim()} type="submit">
+      <button className="primary" disabled={controlsDisabled || !scripts.length || !directory.trim()} type="submit">
         {scripts.length === 1 ? 'Save 1 script' : scripts.length ? `Save ${scripts.length} scripts` : 'Save scripts'}
       </button>
       {busy === 'save' && <p role="status">Saving scripts…</p>}
