@@ -60,7 +60,7 @@ test('batch directory discovery preserves tests, voices, nested audio and filena
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('invalid layouts, empty tests, limits, and links fail explicitly', async () => {
+test('invalid layouts, empty tests, and links fail while large tests are accepted', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-batch-invalid-'));
   const importer = new BatchImport();
   try {
@@ -76,7 +76,8 @@ test('invalid layouts, empty tests, limits, and links fail explicitly', async ()
     const result = await importer.plan({ directory: root });
     assert.match(result.tests[0].errors.join(' '), /voice subfolder.*No supported audio/);
     assert.match(result.tests[1].errors.join(' '), /nonempty/);
-    assert.match(result.tests[2].errors.join(' '), /at most 200/);
+    assert.equal(result.tests[2].files.length, 201);
+    assert.deepEqual(result.tests[2].errors, []);
     await rm(path.join(root, 'too-many', 'Voice', '200.wav'));
     const boundary = await importer.plan({ directory: root });
     assert.equal(boundary.tests[2].files.length, 200);
@@ -190,7 +191,7 @@ test('batch submissions use one shared snapshot, per-test locale, sequential ord
   assert.equal(judges[0].name, 'Batch judge');
 });
 
-test('shared clip preparation keeps complete windows, voice grouping, role selection and the 200-input limit', async () => {
+test('shared clip preparation keeps complete windows, voice grouping, and roles beyond 200 inputs', async () => {
   const profile = { ...newTestProfile(), scope: 'both' as const };
   const recording = {
     id: randomUUID(), file: new File(['audio'], 'voice.wav'), path: 'test/Voice/voice.wav',
@@ -207,9 +208,11 @@ test('shared clip preparation keeps complete windows, voice grouping, role selec
   assert.deepEqual(uploads.map(clip => clip.role), ['agent', 'customer', 'agent', 'customer']);
   assert.equal(uploads[0].start, 0); assert.equal(uploads[2].end, MAX_SECONDS + 1);
   assert.ok(uploads.every(clip => clip.voice === 'Voice' && clip.language === 'fr-FR' && clip.file === recording.path));
-  await assert.rejects(prepareEvaluationClips([recording], profile, async () => {
-    assert.fail('Over-limit audio must not upload');
-  }, () => {}, Array.from({ length: 198 }, () => randomUUID()), audio), /more than 200/);
+  const large = Array.from({ length: 198 }, () => randomUUID());
+  const larger = await prepareEvaluationClips([recording], profile, async clip => { uploads.push(clip); }, () => {}, large, audio);
+  assert.equal(larger.length, 202);
+  assert.deepEqual(larger.slice(0, large.length), large);
+  assert.deepEqual(larger.slice(large.length), uploads.slice(4).map(clip => clip.id));
   const initialIds = Array.from({ length: 196 }, () => randomUUID());
   assert.equal((await prepareEvaluationClips([recording], profile, async () => {}, () => {}, initialIds, audio)).length, 200);
   assert.equal(initialIds.length, 196);

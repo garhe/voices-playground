@@ -8,6 +8,7 @@ clips/
 .env.*
 !.env.example
 connection.json
+speech-connection.json
 settings.json
 *.pcm
 *.wav

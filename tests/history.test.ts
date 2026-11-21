@@ -52,6 +52,19 @@ test('judge numbers, fields and remove buttons share a bottom edge and control h
   assert.match(css, /\.judge>\.judge-avatar,\.judge>\.icon-button\{flex:0 0 36px;width:36px\}/);
 });
 
+test('workspace filters share compact controls and wrap to the available container width', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.filter-bar, \.field-row\.filter-bar \{[^}]*repeat\(auto-fit, minmax\(min\(100%, 11rem\), 1fr\)\)/);
+  assert.match(css, /\.filter-bar input:not\(\[type=checkbox\]\), \.filter-bar select \{ height: 36px; min-height: 36px;/);
+  assert.match(css, /\.filter-bar \.multi-filter-trigger \{[^}]*height: 36px; min-height: 36px;/);
+  assert.match(css, /\.filter-bar \.date-control input \{ padding-right: 44px; \}/);
+  assert.match(css, /\.filter-bar--single \{ width: 100%; max-width: 24rem; \}/);
+  for (const file of ['VoiceArena', 'AzureVoicesStudio', 'TestLibrary', 'ScriptGeneration']) {
+    const source = readFileSync(new URL(`../src/${file}.tsx`, import.meta.url), 'utf8');
+    assert.match(source, /className="[^"]*\bfilter-bar\b[^"]*"/, file);
+  }
+});
+
 test('shared surfaces keep opaque fallbacks, readable headers and flat native checkboxes', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /--mica-flyout:\s*rgb\(var\(--theme-surface-rgb\)\);/);
@@ -318,7 +331,8 @@ test('palette hover gradients cover workspace controls, rows and shared menus wi
   assert.match(mixed, /:is\(\.nav, \.history-item\):enabled:is\(:hover, :focus-visible\) \{[^}]*color: var\(--theme-sidebar-ink\)/);
   assert.match(mixed, /\.test-table tbody tr:hover \{[^}]*--mica-text: var\(--mica-hover-text\);[^}]*--theme-heading: var\(--mica-hover-text\);[^}]*background: var\(--mica-hover\);/);
   assert.match(mixed, /::placeholder \{\s*color: var\(--mica-hover-text\);\s*opacity: 1/);
-  for (const selector of ['button:not(.danger, .nav, .history-item):enabled', 'a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
+  assert.match(mixed, /\.test-table-scroll > \.test-table > tbody > tr:hover > :is\(td:first-child:not\(\[colspan\]\), td:nth-child\(2\)\) \{\s*background: var\(--mica-hover\);/);
+  for (const selector of ['button:not(.danger, .nav, .history-item, .arena-score):enabled', 'a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
     assert.ok(mixed.includes(selector), `${selector} uses mixed hover colors`);
   assert.match(mixed, /:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-hover\);\s*color: var\(--mica-hover-text\)/);
   assert.match(mixed, /button\.danger:enabled:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-danger\);\s*color: #ffffff/);
@@ -491,7 +505,9 @@ test('test status labels use title case without changing stored status or semant
 
 test('sidebar expansion loads another batch in place rather than linking to the test library', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(source, /history\.slice\(0, recentLimit\)/);
+  assert.match(source, /const visibleHistory = workspaceHistory\(history, arenaMode \? 'arena' : 'scoring'\)/);
+  assert.match(source, /visibleHistory\.slice\(0, recentLimit\)/);
+  assert.match(source, /visibleHistory\.length - recentLimit/);
   assert.match(source, /onClick=\{\(\) => setRecentLimit\(limit => limit \+ RECENT_TEST_BATCH\)\}/);
   assert.doesNotMatch(source, />View all /);
   assert.doesNotMatch(source, />Back to all tests</);
@@ -525,21 +541,16 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.match(html, /aria-label="Select all eligible tests on this page"/);
   for (const field of ['Test name', 'Test time', 'Test type', 'Best voice', 'Best score', 'Language', 'Gender', 'Actions']) {
     assert.equal((body.match(new RegExp(`data-label="${field}"`, 'g')) ?? []).length, 30);
-    assert.ok(html.includes(`<th scope="col">${field}</th>`));
+    assert.ok(html.includes(field === 'Actions' ? '<th scope="col">Actions</th>'
+      : `<button class="table-sort-button" type="button"><span>${field}</span>`));
   }
   assert.match(html, /\+2 tied/);
   assert.match(html, /title="Talent 60 \/ speaker, Tied talent B \/ speaker, Tied talent C \/ speaker"/);
-  const toolbar = html.split('<div class="test-filters">')[1]?.split('<div class="test-list-meta">')[0];
+  const toolbar = html.split('<div class="test-filters filter-bar">')[1]?.split('<div class="test-list-meta">')[0];
   assert.ok(toolbar);
-  assert.equal((toolbar.match(/<label/g) ?? []).length, 8);
-  assert.match(toolbar, /<label>Test type<select>/);
-  assert.match(toolbar, /<option value=""[^>]*>All test types<\/option>/);
-  assert.match(toolbar, /<option value="audition">Voice Selection<\/option>/);
-  assert.match(toolbar, /<option value="tts">TTS evaluation<\/option>/);
-  assert.match(toolbar, /<label>Test Status<select>/);
-  assert.match(toolbar, /<option value=""[^>]*>All statuses<\/option>/);
-  for (const status of TEST_STATUS_FILTERS)
-    assert.match(toolbar, new RegExp(`<option value="${status}">${status === 'incomplete' ? 'Completed\\*' : testStatusLabel({ status })}</option>`));
+  assert.equal((toolbar.match(/class="multi-filter"/g) ?? []).length, 4);
+  for (const label of ['Voice Selection', 'TTS evaluation', ...TEST_STATUS_FILTERS.map(status => status === 'incomplete' ? 'Completed*' : testStatusLabel({ status }))])
+    assert.ok(toolbar.includes(`/>${label}</label>`), label);
   assert.match(toolbar, /<label[^>]*>From date<\/label>/);
   assert.match(toolbar, /<label[^>]*>To date<\/label>/);
   assert.equal((toolbar.match(/class="date-menu"/g) ?? []).length, 2);
@@ -737,6 +748,8 @@ test('search and combined filters apply before pagination and search all saved t
   assert.equal(filtered.total, 32);
   assert.equal(filtered.entries.length, 2);
   assert.ok(filtered.entries.every(entry => entry.languages.includes('English') && entry.genders.includes('Female')));
+  const multiple = queryTests(values, { ...defaultTestFilters, language: ['english', 'missing'], gender: ['Female', 'Other'], stage: ['audition', 'tts'], status: ['completed', 'incomplete'] }, 2);
+  assert.deepEqual(multiple.entries, filtered.entries);
   assert.equal(queryTests(values, { ...defaultTestFilters, search: '  TEST 65 ' }, 1).entries[0].id, '64');
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Talent 64' }, 1).total, 1);
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Italian', gender: 'Female' }, 1).total, 0);
@@ -976,7 +989,7 @@ test('setup sections support native collapse and queue/start actions live in the
   assert.match(html, /<summary><span>03 · Bring your recordings/);
   assert.match(html, /0 recordings · 0 voices · 0 included/);
   assert.match(html, />Add to queue<\/button>/);
-  assert.match(html, /03<\/span> Folder sorting/);
+  assert.match(html, /FS<\/span> Folder Sorting/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.evaluation-action-bar\{position:fixed;bottom:0;/);
   const actionBar = css.match(/\.evaluation-action-bar\{([^}]+)\}/)?.[1];
@@ -1172,9 +1185,11 @@ test('folder sorting UI defaults to replacement without a confirmation dialog an
 test('new evaluations load the saved default panel rather than inheriting an old report panel', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const setup = source.split('function beginNewEvaluation() {')[1].split('function updateLanguageAccent')[0];
-  assert.match(setup, /await api<Config>\('\/api\/config'\)/);
+  assert.match(setup, /await getConfiguration\(\)/);
+  assert.match(source.split('async function getConfiguration(')[1], /^[^]*?await api<Config>\('\/api\/config'/);
   assert.match(setup, /judges: sortJudges\(configuration\.judges\)/);
   assert.doesNotMatch(setup, /job\.judges/);
+  assert.match(setup, /evaluationWorkspace\(job\) === \(arenaMode \? 'arena' : 'scoring'\) \? job\.profile : profile/);
   assert.match(source, /Save panel as default/);
 });
 
@@ -1262,6 +1277,9 @@ test('sorting is global and deterministic with unassessed scores always last', (
     assert.equal(all.at(-1)!.bestScore, null);
     assert.equal(all[0].bestScore, sort === 'score-asc' ? 0.05 : 3.2);
   }
+  const withLanguages = values.map((entry, index) => ({ ...entry, languages: index < 60 ? ['en-US'] : ['de-DE'] }));
+  assert.equal(queryTests(withLanguages, { ...defaultTestFilters, sort: 'language-asc' }, 1).entries[0].languages[0], 'de-DE');
+  assert.equal(queryTests(withLanguages, { ...defaultTestFilters, sort: 'language-desc' }, 3).entries.at(-1)?.languages[0], 'de-DE');
 });
 
 test('metadata validation rejects duplicate labels, unknown gender labels and assessment changes', () => {

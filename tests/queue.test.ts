@@ -13,7 +13,8 @@ import type { BulkTestResult } from '../shared/history.js';
 import { RUBRIC_VERSION, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, unassessedInputs, type Job, type TestQueueState } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TestQueue } from '../src/TestQueue.js';
+import { TestQueue, queueForWorkspace } from '../src/TestQueue.js';
+import { testHistory } from '../shared/history.js';
 
 async function until<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
   for (let n = 0; n < 200; n++) {
@@ -27,6 +28,106 @@ function gate() {
   let release!: () => void;
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
+}
+
+for (const clipConcurrency of [undefined, 2] as const) {
+  const limit = clipConcurrency ?? 1;
+  test(`mode ${limit} respects its slot budget and keeps later evaluations waiting`, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'voice-clip-concurrency-'));
+    const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const gates = Array.from({ length: 7 }, gate);
+    const fastJudge = gate();
+    const secondJudge = gate();
+    const finishingJudge = gate();
+    const calls: [number, string][] = [];
+    const activeByJudge = new Map<string, number>();
+    let active = 0, peak = 0, peakPerJudge = 0, nextStarted = false;
+    const backend = await createApp({
+      dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+      clipConcurrency, deployments: 'first,second,third',
+      evaluate: async input => {
+        if (input.profile.target === 'Next locale') {
+          nextStarted = true;
+          assert.equal(active, 0);
+        } else {
+          const index = input.pcm[0] - 1;
+          const judge = input.judge.deployment;
+          calls.push([index, judge]);
+          const count = (activeByJudge.get(judge) ?? 0) + 1;
+          activeByJudge.set(judge, count);
+          peakPerJudge = Math.max(peakPerJudge, count);
+          peak = Math.max(peak, ++active);
+          const hold = judge === 'third' ? finishingJudge : judge === 'second' ? secondJudge : index === 0 ? fastJudge : gates[index];
+          await hold.promise;
+          active--;
+          activeByJudge.set(judge, activeByJudge.get(judge)! - 1);
+        }
+        const result = assessment();
+        result.scores.contextFit = 4;
+        return { assessment: result };
+      },
+    });
+    backend.app.use(backend.errors); server.on('request', backend.app);
+    const url = `http://127.0.0.1:${address.port}`;
+    const audio = gates.map((_, i) => clip({ file: `collection/Candidate A/clip-${i}.wav` }));
+    const readQueue = async () => await (await fetch(`${url}/api/queue`)).json() as TestQueueState;
+    async function queue(target: string, clipIds: string[]) {
+      const response = await fetch(`${url}/api/jobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: target, profile: { ...profile, target }, clipIds, consent: true, enqueue: true }),
+      });
+      assert.equal(response.status, 201);
+      return await response.json() as Job;
+    }
+    try {
+      for (const [i, input] of audio.entries()) await backend.store.saveClip(input, Buffer.alloc(48000, i + 1));
+      const first = await queue('First locale', audio.map(input => input.id));
+      const later = await queue('Next locale', [audio[0].id]);
+      await until(async () => active, value => value === limit * 3);
+      assert.deepEqual(calls.map(([index]) => index).sort(), limit === 2 ? [0, 0, 0, 1, 1, 1] : [0, 0, 0]);
+      assert.equal((await readQueue()).active?.id, first.id);
+      assert.equal((await readQueue()).waiting[0]?.id, later.id);
+      assert.equal(nextStarted, false);
+      if (limit === 2) {
+        fastJudge.release();
+        await until(async () => calls.filter(([index]) => index === 2).length, count => count === 1);
+        assert.deepEqual(calls.filter(([index]) => index === 2), [[2, 'first']]);
+        assert.equal(active, 6);
+        assert.deepEqual(['first', 'second', 'third'].map(judge => activeByJudge.get(judge)), [2, 2, 2]);
+        finishingJudge.release();
+        await until(async () => ['first', 'second', 'third'].map(judge => activeByJudge.get(judge)),
+          counts => counts[0] === 3 && counts[1] === 3 && counts[2] === 0);
+        assert.equal(active, 6);
+        secondJudge.release();
+        await until(async () => ['first', 'second', 'third'].map(judge => activeByJudge.get(judge)),
+          counts => counts[0] === 6 && counts[1] === 0 && counts[2] === 0);
+        assert.equal(active, 6);
+        assert.equal((await readQueue()).active?.id, first.id);
+        assert.equal(nextStarted, false);
+      }
+      fastJudge.release();
+      secondJudge.release();
+      finishingJudge.release();
+      for (const pending of gates) pending.release();
+      await until(readQueue, state => !state.active && !state.waiting.length);
+      assert.equal(peak, limit * 3);
+      assert.equal(peakPerJudge, limit === 2 ? 6 : 1);
+      assert.deepEqual([...calls].sort(), audio.flatMap((_, index) => ['first', 'second', 'third'].map(judge => [index, judge])));
+      assert.equal(nextStarted, true);
+      const saved = await backend.store.jobs();
+      assert.equal(saved.find(job => job.id === first.id)?.results.filter(r => r.status === 'completed').length, audio.length * 3);
+      assert.equal(saved.find(job => job.id === later.id)?.status, 'completed');
+    } finally {
+      fastJudge.release();
+      secondJudge.release();
+      finishingJudge.release();
+      for (const pending of gates) pending.release();
+      backend.cancelActive();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test('fresh installations default to five judges and saved panels survive restart and environment overrides', async () => {
@@ -57,6 +158,7 @@ test('automatic retries finish before later tests without cooldowns or attempt l
     evaluate: async input => {
       calls.push(input.profile.target);
       const result = assessment(4.5);
+      assert.equal(input.collectVoiceDescriptors, true);
       result.scores.contextFit = 4;
       result.speakerAttribution = { role: 'agent', status: 'identified', evidence: 'The agent offers help.' };
       assert.equal(input.role, 'agent');
@@ -519,13 +621,54 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   assert.match(css, /\.test-queue-row>button\{justify-self:end\}/);
 });
 
-test('concurrent queue admissions persist before execution and a dispatch save failure pauses without losing tests', async () => {
+test('workspace queue hides other jobs and unclassified names while retaining global controls', () => {
+  const arena = fixtureJob(); arena.name = 'Arena active job'; arena.arena = { domain: 'service', locale: 'en-US', scripts: ['en-US_service'] };
+  const scoring = fixtureJob(); scoring.name = 'Scoring queued job';
+  const waitingArena = fixtureJob(); waitingArena.name = 'Arena queued job'; waitingArena.arena = arena.arena;
+  const history = [arena, scoring, waitingArena].map(testHistory);
+  const state: TestQueueState = {
+    paused: true,
+    active: { id: arena.id, name: arena.name },
+    waiting: [
+      { id: scoring.id, name: scoring.name },
+      { id: waitingArena.id, name: waitingArena.name },
+      { id: 'unknown', name: 'Unclassified job' },
+    ],
+  };
+  const scoringQueue = queueForWorkspace(state, history, 'scoring');
+  assert.equal(scoringQueue.hiddenActive, true);
+  assert.equal(scoringQueue.hiddenWaiting, 2);
+  assert.deepEqual(scoringQueue.state.waiting.map(entry => entry.id), [scoring.id]);
+  const noop = () => {};
+  const render = (workspace: 'arena' | 'scoring', queue = state) => renderToStaticMarkup(createElement(TestQueue, {
+    state: queue, workspace, history, busy: false, onPause: noop, onStart: noop, onCancel: noop,
+  }));
+  const scoringHtml = render('scoring');
+  assert.match(scoringHtml, /Scoring queued job/);
+  assert.match(scoringHtml, /Another or unclassified test is running/);
+  assert.match(scoringHtml, /Queue controls apply to both/);
+  assert.doesNotMatch(scoringHtml, /Arena active job|Arena queued job|Unclassified job/);
+  assert.doesNotMatch(scoringHtml, /Cancel running test/);
+  const arenaHtml = render('arena');
+  assert.match(arenaHtml, /Arena active job/);
+  assert.match(arenaHtml, /Arena queued job/);
+  assert.match(arenaHtml, /Cancel running test/);
+  assert.doesNotMatch(arenaHtml, /Scoring queued job|Unclassified job/);
+  const onlyOtherWaiting = render('scoring', { paused: true, waiting: [{ id: waitingArena.id, name: waitingArena.name }] });
+  assert.match(onlyOtherWaiting, /<button class="secondary">Start queue<\/button>/);
+  assert.doesNotMatch(onlyOtherWaiting, /Arena queued job/);
+  const marked = queueForWorkspace({ paused: false, waiting: [{ id: 'new', name: 'New Arena', workspace: 'arena' }] }, [], 'scoring');
+  assert.equal(marked.hiddenWaiting, 1);
+});
+
+test('concurrent queue admissions persist before execution and a dispatch save failure retries without losing tests', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-queue-persistence-'));
   const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const calls: string[] = [];
   const backend = await createApp({
     dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    saveRetryDelayMs: 25,
     evaluate: async input => {
       calls.push(input.profile.target);
       const result = assessment(); result.scores.contextFit = 4;
@@ -533,7 +676,7 @@ test('concurrent queue admissions persist before execution and a dispatch save f
     },
   });
 
-  test('bulk redo snapshots saved settings into new queued jobs, preserves originals, and reports per-test failures', async () => {
+  await t.test('bulk redo snapshots saved settings into new queued jobs, preserves originals, and reports per-test failures', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'voice-bulk-tests-'));
     const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -627,14 +770,11 @@ test('concurrent queue admissions persist before execution and a dispatch save f
       if (fail && job.status === 'running') { fail = false; throw new Error('Synthetic disk failure'); }
       return save(job);
     };
-    await post('/api/queue/start', { consent: true });
-    const paused = await state();
-    assert.equal(paused.paused, true);
-    assert.match(paused.error!, /Synthetic disk failure/);
-    assert.equal(paused.waiting.length, 6);
-    assert.deepEqual(calls, []);
-    assert.equal((await backend.store.read<Job>(path.join('jobs', `${persisted[0].id}.json`))).status, 'queued');
-    await post('/api/queue/start', { consent: true });
+    const recovering = await (await post('/api/queue/start', { consent: true })).json() as TestQueueState;
+    assert.equal(recovering.paused, false);
+    assert.equal(recovering.recoveringSave, true);
+    assert.match(recovering.error!, /Synthetic disk failure/);
+    assert.deepEqual(recovering.waiting.map(job => job.id), persisted.map(job => job.id));
     await until(state, value => !value.active && !value.waiting.length);
     assert.deepEqual(calls, persisted.map(job => job.profile.target));
     assert.equal((await state()).error, undefined);

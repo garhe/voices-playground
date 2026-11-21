@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { SortHeader } from './TableSort';
 import { evaluationName, testType, voiceGenders, type Job, type VoiceLabel } from '../shared/domain';
 import { canManageTest, canRetryUnassessedTest, defaultTestFilters, queryTests, testNameMetadata, testStatusLabel, TEST_PAGE_SIZES, TEST_STATUS_FILTERS, type BulkTestAction, type TestFilters, type TestHistory } from '../shared/history';
 import { TestActions, type ReportKind } from './TestActions';
 import { DatePicker } from './DatePicker';
+import { MultiFilter } from './MultiFilter';
+import { filterValues } from '../shared/filterSelection';
 
 export type { ReportKind } from './TestActions';
 export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selectedIds, onSelectionChange, onExportSelected, onBulkAction, onRetryUnassessed, onOpen, onEdit, onDelete, onDownload, onRegenerate, onRefresh }: {
@@ -20,6 +23,9 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
   const [page, setPage] = useState(1);
   const [dateReset, setDateReset] = useState(0);
   const results = queryTests(entries, filters, page, pageSize);
+  const sortHeader = (label: string, asc: TestFilters['sort'], desc: TestFilters['sort'], first = asc) =>
+    <SortHeader direction={filters.sort === asc ? 'ascending' : filters.sort === desc ? 'descending' : undefined}
+      onSort={() => update('sort', filters.sort === asc ? desc : filters.sort === desc ? asc : first)}>{label}</SortHeader>;
   const selectionControl = useRef<HTMLInputElement>(null);
   const selected = entries.filter(entry => selectedIds.includes(entry.id) && canManageTest(entry));
   const retryableSelected = selected.filter(canRetryUnassessedTest);
@@ -45,28 +51,24 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
       <button className="secondary" disabled={busy} onClick={onRefresh}>Refresh tests</button>
     </div>
     <section className="card test-library" aria-label="Saved tests">
-      <div className="test-filters">
+      <div className="test-filters filter-bar">
         <label className="test-search">Search tests<input type="search" placeholder="Test name, voice, language or ID" value={filters.search} onChange={event => update('search', event.target.value)} /></label>
-        <label>Test Status<select value={filters.status} onChange={event => update('status', event.target.value as TestFilters['status'])}>
-          <option value="">All statuses</option>{TEST_STATUS_FILTERS.map(status =>
-            <option key={status} value={status}>{status === 'incomplete' ? 'Completed*' : testStatusLabel({ status })}</option>)}
-        </select></label>
-        <label>Test type<select value={filters.stage} onChange={event => update('stage', event.target.value as TestFilters['stage'])}>
-          <option value="">All test types</option>
-          <option value="audition">{testType('audition')}</option><option value="tts">{testType('tts')}</option>
-        </select></label>
-        <label>Language<select value={filters.language} onChange={event => update('language', event.target.value)}>
-          <option value="">All languages</option>{languages.map(language => <option key={language}>{language}</option>)}
-        </select></label>
-        <label>Gender<select value={filters.gender} onChange={event => update('gender', event.target.value)}>
-          <option value="">All genders</option>{voiceGenders.map(gender => <option key={gender}>{gender}</option>)}
-        </select></label>
+        <MultiFilter label="Test Status" all="All statuses" value={filterValues(filters.status)} onChange={value => update('status', value)}
+          options={TEST_STATUS_FILTERS.map(status => ({ value: status, label: status === 'incomplete' ? 'Completed*' : testStatusLabel({ status }) }))} />
+        <MultiFilter label="Test type" all="All test types" value={filterValues(filters.stage)} onChange={value => update('stage', value)}
+          options={(['audition', 'tts'] as const).map(value => ({ value, label: testType(value) }))} />
+        <MultiFilter label="Language" all="All languages" options={languages} value={filterValues(filters.language)} onChange={value => update('language', value)} searchable />
+        <MultiFilter label="Gender" all="All genders" options={voiceGenders} value={filterValues(filters.gender)} onChange={value => update('gender', value)} />
         <DatePicker key={`from-${dateReset}`} label="From date" value={filters.dateFrom} max={filters.dateTo || undefined} onChange={value => update('dateFrom', value)} />
         <DatePicker key={`to-${dateReset}`} label="To date" value={filters.dateTo} min={filters.dateFrom || undefined} onChange={value => update('dateTo', value)} />
         <label>Sort by<select value={filters.sort} onChange={event => update('sort', event.target.value as TestFilters['sort'])}>
           <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
           <option value="name-asc">Test name A-Z</option><option value="name-desc">Test name Z-A</option>
           <option value="score-desc">Best score: high to low</option><option value="score-asc">Best score: low to high</option>
+          {(['type', 'voice', 'language', 'gender'] as const).flatMap((key, index) => {
+            const label = ['Test type', 'Best voice', 'Language', 'Gender'][index];
+            return ['asc', 'desc'].map(direction => <option key={`${key}-${direction}`} value={`${key}-${direction}`}>{label} {direction === 'asc' ? 'A-Z' : 'Z-A'}</option>);
+          })}
         </select></label>
       </div>
       {dateError && <p className="error-text" role="alert">From date must be on or before To date.</p>}
@@ -81,15 +83,18 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
             onClick={() => onRetryUnassessed(retryableSelected)}>Retry all unassessable ({retryableSelected.length})</button>}
           <button className="text-button" disabled={busy} onClick={() => onSelectionChange([])}>Clear selection</button>
         </div>}
-        <button className="text-button" disabled={!filters.search && !filters.status && !filters.stage && !filters.language && !filters.gender && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
+        <button className="text-button" disabled={!filters.search && !filterValues(filters.status).length && !filterValues(filters.stage).length && !filterValues(filters.language).length && !filterValues(filters.gender).length && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
       </div>
-      <div className="table-scroll test-table-scroll" tabIndex={0} aria-label="Saved test list">
+      <div className="table-scroll table-scroll--with-selection test-table-scroll" tabIndex={0} role="region" aria-label="Saved test list">
         <table className="test-table">
           <caption className="sr-only">Saved evaluations, up to {pageSize} tests per page</caption>
           <thead><tr><th scope="col" className="test-select"><input ref={selectionControl} type="checkbox" aria-label="Select all eligible tests on this page"
             disabled={busy || !eligibleOnPage.length} checked={eligibleOnPage.length > 0 && checkedOnPage === eligibleOnPage.length}
             onChange={event => select(eligibleOnPage.map(entry => entry.id), event.target.checked)} /></th>
-            <th scope="col">Test name</th><th scope="col">Test time</th><th scope="col">Test type</th><th scope="col">Best voice</th><th scope="col">Best score</th><th scope="col">Language</th><th scope="col">Gender</th><th scope="col">Actions</th></tr></thead>
+            {sortHeader('Test name', 'name-asc', 'name-desc')}{sortHeader('Test time', 'oldest', 'newest', 'newest')}
+            {sortHeader('Test type', 'type-asc', 'type-desc')}{sortHeader('Best voice', 'voice-asc', 'voice-desc')}
+            {sortHeader('Best score', 'score-asc', 'score-desc', 'score-desc')}{sortHeader('Language', 'language-asc', 'language-desc')}
+            {sortHeader('Gender', 'gender-asc', 'gender-desc')}<th scope="col">Actions</th></tr></thead>
           <tbody>{results.entries.map(entry => <tr key={entry.id}>
             <td className="test-select"><input type="checkbox" aria-label={`Select test ${entry.name}`} checked={selectedSet.has(entry.id)}
               disabled={busy || !canManageTest(entry)} title={canManageTest(entry) ? 'Select for report export or bulk actions' : 'Running and queued tests cannot be deleted or redone'}

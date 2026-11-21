@@ -243,7 +243,7 @@ test('assessment tool requires every field and dimension, constrains scores and 
   const automatic = assessmentTool({ speakerMode: 'automatic' }, 'customer');
   assert.equal(manual.name, ASSESSMENT_FUNCTION);
   assert.equal(manual.parameters.additionalProperties, false);
-  assert.deepEqual(manual.parameters.required.sort(), Object.keys(assessmentSchema.shape).filter(k => k !== 'speakerAttribution').sort());
+  assert.deepEqual(manual.parameters.required.sort(), Object.keys(assessmentSchema.shape).filter(k => k !== 'speakerAttribution' && k !== 'voiceDescriptors').sort());
   assert.deepEqual(manual.parameters.properties.scores.required, [...dimensions]);
   for (const dimension of dimensions) {
     const bounds = assessmentSchema.shape.scores.shape[dimension].unwrap();

@@ -13,8 +13,6 @@ export async function prepareEvaluationClips(
     progress(`Preparing ${index + 1}/${recordings.length}: ${recording.file.name}`);
     const buffer = await audio.decode(recording.file);
     const regions = profile.speakerMode === 'automatic' ? automaticRegions(buffer.duration, profile.scope) : recording.regions;
-    if (ids.length + regions.length > 200)
-      throw new Error('The complete recordings require more than 200 role/audio inputs. Include fewer files in this evaluation; no audio is silently truncated.');
     for (const region of regions) {
       const id = crypto.randomUUID();
       await upload({

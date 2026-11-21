@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { isDeepStrictEqual } from 'node:util';
+import { voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { type Assessment, type AssessmentResponseFormat, type AudioDiagnostics, type AudioResponseDiagnostic, type Judge, type Profile, type Clip, activeDimensions, assessmentSchema, claimsMissingAudio, dimensions, eligibleScore, normalizeAssessment, RUBRIC_VERSION, dimensionGuidance, dimensionLabel, dimensionWeight, profileRubric } from '../shared/domain.js';
@@ -16,7 +17,7 @@ Keep overall observations concise: prioritize the most important supported defec
 function objectParameters<T extends Record<string, unknown>>(properties: T) {
   return { type: 'object', properties, required: Object.keys(properties), additionalProperties: false };
 }
-export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 'singleSpeakerFallback' | 'target' | 'targetMarket' | 'rubric' | 'stage'>> = {}, role: Clip['role'] = 'speaker') {
+export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 'singleSpeakerFallback' | 'target' | 'targetMarket' | 'rubric' | 'stage'>> = {}, role: Clip['role'] = 'speaker', collectVoiceDescriptors = false) {
   const scoringProfile: Profile = { stage: 'audition', scope: 'single', language: 'auto', target: '', ...profile };
   const active = activeDimensions(scoringProfile);
   return {
@@ -26,6 +27,13 @@ export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 's
       language: { type: 'string', minLength: 1, maxLength: 100, description: 'Actual audio language named in English, or unknown.' },
       languageSupported: { type: 'boolean', description: 'Whether you can reliably evaluate pronunciation and idiomatic prosody in the actual audible language, not merely understand the words. Use the supplied listening hint as context, not proof. If false, leave linguistic/performance scores null and explain the specific language limitation in limitations.' },
       assessable: { type: 'boolean' },
+      ...(collectVoiceDescriptors ? { voiceDescriptors: {
+        ...objectParameters(Object.fromEntries(voiceDescriptorKeys.map(key => {
+          const field = voiceDescriptorFields[key];
+          return [key, { type: ['string', 'null'], enum: [...field.choices, null], description: field.guidance }];
+        }))),
+        description: 'Choose one best-fit English label per field for the target voice only, even when evidence is limited or you cannot score the performance. Return your best estimate rather than multiple alternatives. Use null only when no usable target speech or no relevant audible cue exists. These labels do not affect scores. For recorded speech, describe the perceived voice, never identify the person or claim their actual age.',
+      } } : {}),
       ...(profile.speakerMode === 'automatic' ? {
         speakerAttribution: objectParameters({
           role: { type: 'string', enum: [role] },
@@ -244,6 +252,7 @@ export function parseAssessmentResponse(output: unknown, profile: Profile, role?
 
 type Options = {
   endpoint: string; key: string; judge: Judge; pcm: Buffer; profile: Profile; role?: Clip['role']; signal: AbortSignal;
+  collectVoiceDescriptors?: boolean;
   connect?: (url: string, key: string) => WebSocket;
 };
 type TestOptions = Pick<Options, 'endpoint' | 'key' | 'judge' | 'connect'>;
@@ -410,7 +419,7 @@ If speech is genuinely inaudible, the language is unsupported, or the requested 
         } else if (event.type === 'session.created') {
           model = typeof event.session?.model === 'string' ? event.session.model : undefined;
           diagnostic.model = model;
-          send(sessionConfiguration(prompt, assessmentTool(profile, role)));
+          send(sessionConfiguration(prompt, assessmentTool(profile, role, options.collectVoiceDescriptors)));
         } else if (event.type === 'session.updated' && !configured) {
           configured = true;
           for (let offset = 0; offset < pcm.length; offset += 48000) {

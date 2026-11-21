@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import type { BatchPreview, BatchRequest, BatchTest } from '../shared/batch';
 import { parseSortingPaths as parseFolderPaths } from '../shared/sorting';
-import { profileSchema, settingsSchema, rolesForScope, testType, type Judge, type Profile, type Settings } from '../shared/domain';
+import { profileSchema, settingsSchema, testType, type Judge, type Profile, type Settings } from '../shared/domain';
 import { batchTestProfile, submitBatch, type BatchSubmission } from './batch';
+import { useTableSort } from './TableSort';
 
-export function BatchEvaluation({ profile, config, busy, onAction, onPreview, onQueue, onRefresh }: {
+export function BatchEvaluation({ profile, config, busy, onAction, onPreview, onQueue, onRefresh, profileForTest = batchTestProfile }: {
   profile: Profile; config?: Settings & { configured: boolean }; busy: boolean;
   onAction: (label: string, run: () => Promise<void>) => Promise<void>;
   onPreview: (request: BatchRequest) => Promise<BatchPreview>;
   onQueue: (token: string, test: BatchTest, profile: Profile, judges: Judge[]) => Promise<{ id: string }>;
   onRefresh: () => Promise<void>;
+  profileForTest?: (profile: Profile, name: string) => Profile;
 }) {
   const [step, setStep] = useState<'settings' | 'directory'>('settings');
   const [directory, setDirectory] = useState('');
@@ -18,6 +20,7 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
   const [preview, setPreview] = useState<BatchPreview>();
   const [results, setResults] = useState<BatchSubmission[]>([]);
   const [snapshot, setSnapshot] = useState<{ profile: Profile; judges: Judge[] }>();
+  const sorting = useTableSort();
   // Locale-dependent scoring eligibility is validated per test after folder discovery.
   const settingsReady = config?.configured && settingsSchema.safeParse(snapshot ? { judges: snapshot.judges } : config).success &&
     profileSchema.innerType().safeParse(snapshot?.profile ?? profile).success;
@@ -25,13 +28,22 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
   const sharedProfile = snapshot?.profile ?? profile;
   const errors = (test: BatchTest) => {
     const issues = [...test.errors];
-    if (test.files.length * rolesForScope(sharedProfile.scope).length > 200)
-      issues.push('More than 200 role/audio inputs. Split this test into smaller folders.');
-    try { batchTestProfile(sharedProfile, test.name); }
+    try { profileForTest(sharedProfile, test.name); }
     catch (error) { issues.push(error instanceof Error ? error.message : 'Invalid evaluation settings.'); }
     return issues;
   };
   const queued = results.filter(result => result.id).length;
+  const resultRows = (preview?.tests ?? []).map(test => {
+    const result = results.find(item => item.name === test.name);
+    const issues = errors(test);
+    return { test, result, voices: new Set(test.files.map(file => file.voice)).size,
+      status: result?.id ? 'Submitted to queue' : result?.error || (issues.length ? issues.join(' ') : 'Ready') };
+  });
+  const sortedRows = sorting.rows(resultRows, {
+    name: row => row.test.name, locale: row => row.test.languages.join(', ') || 'Auto',
+    gender: row => row.test.genders.join(', '), voices: row => row.voices,
+    files: row => row.test.files.length, status: row => row.status,
+  });
   const directories = parseFolderPaths(folderPaths);
   function invalidatePreview() {
     setPreview(undefined); setResults([]);
@@ -69,15 +81,13 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
       </div>
       {preview && <>
         <p>{preview.tests.length} tests · {preview.tests.reduce((sum, test) => sum + test.files.length, 0)} audio files · {preview.ignoredFiles} non-audio files ignored.</p>
-        <p className="hint">Shared settings: {testType(sharedProfile.stage)} · {sharedProfile.scope} · automatic speaker selection · {sharedProfile.rubric?.name ?? 'Default rubric'}. Long files are split into complete listening windows; tests exceeding 200 role/audio inputs fail explicitly.</p>
-        <div className="table-scroll"><table><caption>Batch preview and submission results</caption>
-          <thead><tr><th>Test name</th><th>Locale</th><th>Gender</th><th>Voices</th><th>Audio files</th><th>Status</th></tr></thead>
-          <tbody>{preview.tests.map(test => {
-            const result = results.find(item => item.name === test.name);
-            const issues = errors(test);
+        <p className="hint">Shared settings: {testType(sharedProfile.stage)} · {sharedProfile.scope} · automatic speaker selection · {sharedProfile.rubric?.name ?? 'Default rubric'}. All listening windows for a test go into its report.</p>
+        <div className="table-scroll" tabIndex={0} role="region" aria-label="Batch tests"><table><caption>Batch preview and submission results</caption>
+          <thead><tr>{sorting.header('name', 'Test name')}{sorting.header('locale', 'Locale')}{sorting.header('gender', 'Gender')}{sorting.header('voices', 'Voices', 'descending')}{sorting.header('files', 'Audio files', 'descending')}{sorting.header('status', 'Status')}</tr></thead>
+          <tbody>{sortedRows.map(({ test, result, voices, status }) => {
             return <tr key={test.name}><th scope="row">{test.name}</th><td>{test.languages.join(', ') || 'Auto'}</td><td>{test.genders.join(', ')}</td>
-              <td>{new Set(test.files.map(file => file.voice)).size}</td><td>{test.files.length}</td>
-              <td>{result?.id ? 'Submitted to queue' : result?.error ? <span role="alert">{result.error}</span> : issues.length ? issues.join(' ') : 'Ready'}</td></tr>;
+              <td>{voices}</td><td>{test.files.length}</td>
+              <td>{result?.error && !result.id ? <span role="alert">{status}</span> : status}</td></tr>;
           })}</tbody>
         </table></div>
         <p className="hint">Submitting sends the selected audio to your configured Azure resource and incurs usage charges for every test, judge and automatic retry. No separate permission confirmation is required.</p>
@@ -90,7 +100,7 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
             setSnapshot(settings);
             await submitBatch(pending, settings.profile, settings.judges,
               (test, evaluation, judges) => onQueue(preview.token, test, evaluation, judges),
-              result => setResults(previous => [...previous.filter(item => item.name !== result.name), result]));
+              result => setResults(previous => [...previous.filter(item => item.name !== result.name), result]), profileForTest);
             await onRefresh();
           })}>{results.length ? 'Submit remaining tests' : 'Submit all to queue'}</button>
           <button className="secondary" disabled={busy} onClick={() => {

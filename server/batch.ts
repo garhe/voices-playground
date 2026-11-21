@@ -64,7 +64,6 @@ export class BatchImport {
       };
       await visit(testPath);
       if (!test.files.length) test.errors.push('No supported audio found in voice subfolders.');
-      if (test.files.length > 200) test.errors.push('Each test supports at most 200 role/audio inputs. Split this test into smaller folders.');
       response.tests.push(test);
     }
     if (!response.tests.length) throw new Error('No test folders found. Use parent directory → test folders → voice folders → audio files.');

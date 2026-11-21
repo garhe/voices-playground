@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { voiceDescriptorsSchema } from './voiceDescriptors.js';
 
 export const RUBRIC_VERSION = 'audio-only-v4';
 export const SAMPLE_RATE = 24000;
@@ -64,6 +65,29 @@ export const DEFAULT_RUBRIC: Rubric = {
     weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
   })),
 };
+export const ARENA_TEST_GUIDE = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones; no reference script is provided, so do not judge omissions or whether content matches the script), **naturalness** (human-like prosody without robotic, flat or glitchy delivery) and **emotion & speaking style** (an appropriate, consistent, warm and professional emotional tone for the domain). Give detailed, audio-specific reasons for every score.';
+const arenaDimensionGuidance: Record<Dimension, string> = {
+  naturalness: 'How human and native-like the synthetic voice sounds: believable prosody and intonation contours, natural sentence-level melody, smooth joins between words and phrases, and no robotic, monotone, sing-song, metallic or glitchy delivery. Penalize audible TTS tells such as unnatural pitch resets, abrupt phrase endings or mechanical rhythm. Do not rate whether the wording sounds logical or helpful.',
+  articulation: 'Pronunciation accuracy for the target locale, judged from audio alone: words heard should be pronounced correctly, including lexical tones for tonal languages (e.g. Mandarin, Cantonese, Vietnamese), word stress, and vowel and consonant sounds. Penalize audibly mispronounced, slurred, swallowed or garbled words, tones or stress that are implausible for the heard word, and words spoken in the wrong language or locale. No reference script is provided: do not penalize suspected omissions, and do not judge whether names, numbers, dates or abbreviations match the script. Flag them only when the spoken form is itself audibly malformed. Never guess.',
+  pace: 'Comfortable vocal rhythm, phrasing, breath flow and pauses without a rushed or dragging feel, including natural pauses at punctuation and phrase boundaries. Slower is not automatically better.',
+  expressiveness: 'Emotion and speaking style: audible emotional color, warmth, empathy and engagement that suit the script domain (for customer service, a friendly, calm, attentive and professional tone), appropriate emphasis and intonation on key information, and a consistent persona across the whole audio with no sudden or unmotivated shifts. Calm, controlled delivery can be excellent; exaggerated or flat emotion is a defect. Empathetic wording alone earns no credit.',
+  contextFit: 'Fit of the audible voice persona, tone and emotional delivery to the supplied Arena test guide and the script domain. Ignore script, factual, logical, business-process and task-completion requirements.',
+  accentFit: 'Accent fit to the target locale given as a BCP-47 code (for example en-US = General American English, fr-FR = France French, zh-CN = Mainland Mandarin, zh-TW = Taiwan Mandarin, zh-HK = Hong Kong Cantonese, yue-CN = Cantonese as spoken in Guangdong, vi-VN = Vietnamese). Rate how closely pronunciation, vowel/consonant patterns, tones, stress and intonation match a standard, widely accepted professional accent of that locale, and penalize audible foreign-accent carry-over or a different regional variant (for example Mainland features in zh-TW). Judge listener suitability, not nationality, ethnicity or identity, and do not penalize the same mismatch again in other dimensions.',
+  audioQuality: 'Audible fidelity, noise, distortion, clipping, dropouts and synthetic artifacts such as buzz, phasing, clicks or vocoder noise, not the quality of the spoken content.',
+};
+const arenaLabels: Partial<Record<Dimension, string>> = {
+  articulation: 'Pronunciation accuracy', expressiveness: 'Emotion & speaking style', accentFit: 'Accent fit',
+};
+export const ARENA_RUBRIC: Rubric = {
+  id: 'voice-arena-tts-v1', revision: 1, name: 'Voice Arena TTS rubric',
+  instructions: 'Evaluate synthetic TTS voices for a cross-language Voice Arena. Assess audible vocal delivery, not script quality or task completion. Examine each audio thoroughly for accent fit to the target locale, pronunciation accuracy, naturalness, and emotion & speaking style, as well as pace and audio quality. For pronunciation and accent, cite the specific kinds of errors heard (wrong tones, mispronounced, garbled or wrong-language words, foreign-accent carry-over) and where they occur. No reference script is provided, so do not assess omissions or script fidelity. Give detailed, audio-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
+  testGuides: { conversation: DEFAULT_TEST_GUIDE, single: ARENA_TEST_GUIDE, both: BOTH_SPEAKERS_TEST_GUIDE },
+  dimensions: dimensions.map(id => ({
+    id, label: arenaLabels[id] ?? labels[id], description: arenaDimensionGuidance[id], enabled: true,
+    weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
+  })),
+};
+export const BUILT_IN_RUBRIC_IDS: readonly string[] = [DEFAULT_RUBRIC.id, ARENA_RUBRIC.id];
 export const judgeSchema = z.object({
   id: z.string().uuid(),
   name: z.string().trim().min(1).max(80),
@@ -144,9 +168,14 @@ export type DraftClip = StoredClip & { include: boolean };
 export function clipScopeError(scope: Profile['scope'], clips: Clip[]): string | undefined {
   const wanted = rolesForScope(scope);
   if (clips.some(c => !wanted.includes(c.role))) return 'Selected excerpts do not match the speaker scope.';
-  const files = new Set(clips.map(c => JSON.stringify([c.voice, c.file])));
-  for (const file of files) {
-    const selected = clips.filter(c => JSON.stringify([c.voice, c.file]) === file);
+  const files = new Map<string, Clip[]>();
+  for (const clip of clips) {
+    const key = JSON.stringify([clip.voice, clip.file]);
+    const selected = files.get(key);
+    if (selected) selected.push(clip);
+    else files.set(key, [clip]);
+  }
+  for (const selected of files.values()) {
     if (wanted.some(role => !selected.some(c => c.role === role)))
       return 'Every recording needs a confirmed region for each selected role.';
     for (const role of wanted) {
@@ -164,6 +193,7 @@ export const rehearsalCaseSchema = z.object({
   check: z.string().trim().min(1).max(400),
 }).strict();
 export const assessmentSchema = z.object({
+  voiceDescriptors: voiceDescriptorsSchema.optional(),
   language: z.string().min(1).max(100),
   languageSupported: z.boolean(),
   assessable: z.boolean(),
@@ -221,6 +251,8 @@ export const voiceGenders = ['Female', 'Male', 'Other', 'Unspecified'] as const;
 export type VoiceGender = typeof voiceGenders[number];
 export type VoiceLabel = { voice: string; gender: VoiceGender };
 export type Job = {
+  arena?: import('./arena.js').ArenaMetadata;
+  collectVoiceDescriptors?: true;
   id: string; name?: string; createdAt: string; status: 'queued' | 'running' | 'completed' | 'cancelled' | 'interrupted';
   profile: Profile; judges: Judge[]; clips: StoredClip[]; results: JudgeResult[];
   rubric: string;
@@ -231,9 +263,17 @@ export type Job = {
   autoRetryCount?: number;
   retryAfter?: string;
 };
+export type EvaluationWorkspace = 'scoring' | 'arena';
+export function evaluationWorkspace(job: Pick<Job, 'arena'>): EvaluationWorkspace {
+  return job.arena ? 'arena' : 'scoring';
+}
+export type QueuedTest = {
+  id: string; name: string; workspace?: EvaluationWorkspace; retry?: boolean; autoRetryCount?: number;
+};
 export type TestQueueState = {
-  paused: boolean; active?: { id: string; name: string; retry?: boolean; autoRetryCount?: number };
-  waiting: { id: string; name: string; retry?: boolean; autoRetryCount?: number }[]; error?: string;
+  paused: boolean; active?: QueuedTest;
+  waiting: QueuedTest[]; error?: string; recoveringSave?: boolean;
+  eta?: { currentMinutes?: number; batchMinutes?: number };
 };
 export function evaluationName(value: { name?: string }): string {
   return value.name?.trim() || 'Untitled evaluation';
@@ -349,9 +389,18 @@ export function compareVoiceScores(a: Pick<Summary, 'score' | 'dimensions'>, b: 
 }
 export function summarize(job: Job): Summary[] {
   const groups = new Map<string, StoredClip[]>();
+  const completed = new Map<string, JudgeResult[]>();
+  for (const result of job.results) {
+    if (result.status !== 'completed' || !result.assessment) continue;
+    const matches = completed.get(result.clipId);
+    if (matches) matches.push(result);
+    else completed.set(result.clipId, [result]);
+  }
   for (const c of job.clips) {
     const key = JSON.stringify([c.voice, c.role]);
-    groups.set(key, [...(groups.get(key) ?? []), c]);
+    const group = groups.get(key);
+    if (group) group.push(c);
+    else groups.set(key, [c]);
   }
   return [...groups.values()].map(clips => {
     const fileGroups = new Map<string, StoredClip[]>();
@@ -372,7 +421,7 @@ export function summarize(job: Job): Summary[] {
         naturalness: [], articulation: [], pace: [], expressiveness: [], contextFit: [], accentFit: [], audioQuality: [],
       };
       for (const c of fileClips) {
-        const results = job.results.filter(r => r.clipId === c.id && r.status === 'completed' && r.assessment);
+        const results = completed.get(c.id) ?? [];
         for (const r of results) if (r.assessment) languages.add(r.assessment.language);
         // A consensus requires the complete configured panel, not just whichever judges succeeded.
         if (results.length !== job.judges.length) continue;
@@ -440,9 +489,14 @@ export function assessmentGaps(result: JudgeResult | undefined, profile: Profile
 
 export type EvidenceNote = { text: string; files: string[] };
 export function unassessedInputs(job: Job) {
+  const byInput = new Map<string, JudgeResult>();
+  for (const result of job.results) {
+    const key = JSON.stringify([result.clipId, result.judgeId]);
+    if (!byInput.has(key)) byInput.set(key, result);
+  }
   return job.clips.flatMap(clip => {
     const judges = job.judges.flatMap(judge => {
-      const result = job.results.find(result => result.clipId === clip.id && result.judgeId === judge.id);
+      const result = byInput.get(JSON.stringify([clip.id, judge.id]));
       const gaps = assessmentGaps(result, job.profile, clip.role);
       return gaps.length ? [{ judge, result, gaps }] : [];
     });

@@ -1,4 +1,4 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE, ARENA_RUBRIC, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
@@ -32,8 +32,8 @@ export function rubricHasChanges(rubric: Rubric, stored?: Rubric): boolean {
 
 export function newTestProfile(previous: Profile = {
   stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: '', language: 'auto', targetMarket: '',
-}): Profile {
-  const next = { ...previous, singleSpeakerFallback: true, rubric: structuredClone(DEFAULT_RUBRIC) };
+}, rubric: Rubric = DEFAULT_RUBRIC): Profile {
+  const next = { ...previous, singleSpeakerFallback: true, rubric: structuredClone(rubric) };
   return withTestNameLanguage({ ...next, target: defaultTestGuide(next) }, '');
 }
 
@@ -43,7 +43,7 @@ export function defaultTestGuide(profile: Pick<Profile, 'scope' | 'rubric'>): st
 }
 function usesDefaultGuide(profile: Profile): boolean {
   const guides = profileRubric(profile).testGuides;
-  return !profile.target.trim() || [guides.single, guides.conversation, guides.both, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE].includes(profile.target);
+  return !profile.target.trim() || [guides.single, guides.conversation, guides.both, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE].includes(profile.target);
 }
 export function withSpeakerScope(profile: Profile, scope: Profile['scope']): Profile {
   const next = { ...profile, scope };
@@ -54,6 +54,11 @@ export function withRubric(profile: Profile, rubric: Rubric): Profile {
     ...dimension, weights: { audition: dimension.weights.audition > 0 ? 1 : 0, tts: dimension.weights.tts > 0 ? 1 : 0 },
   })) } };
   return usesDefaultGuide(profile) ? { ...next, target: defaultTestGuide(next) } : next;
+}
+/** Moves a saved Arena profile still on the unedited general default rubric to the Arena TTS rubric. */
+export function withArenaRubric(profile: Profile): Profile {
+  const rubric = profileRubric(profile);
+  return rubric.id === DEFAULT_RUBRIC.id && !rubricHasChanges(rubric, DEFAULT_RUBRIC) ? withRubric(profile, ARENA_RUBRIC) : profile;
 }
 
 export function withTestNameLanguage(profile: Profile, name: string): Profile {
@@ -109,14 +114,11 @@ export function evaluationBlockers(input: {
     if (clips.some(c => !clipSchema.safeParse(c).success)) blockers.push('Complete every saved input voice and language hint.');
     const error = clipScopeError(input.scope, clips);
     if (error) blockers.push(error);
-    if (clips.length > 200) blockers.push('Reduce the selection to at most 200 role/audio inputs per evaluation.');
   } else if (!recordings.length) blockers.push('Select an audio folder and include at least one recording.');
   else if (input.speakerMode !== 'automatic') {
     const remaining = recordings.filter(recording => !recordingReviewed(recording, input.scope)).length;
     if (remaining) blockers.push(`Confirm speaker regions for ${remaining} remaining recording${remaining === 1 ? '' : 's'} (${recordings.length - remaining}/${recordings.length} reviewed). Open each recording and click Confirm speaker regions.`);
   }
-  if (!input.savedClips && inputCount(recordings, input.scope, input.speakerMode) > 200)
-    blockers.push('Reduce the selection to at most 200 role/audio inputs per evaluation.');
   if (input.busy) blockers.push('Wait for the current operation to finish.');
   if (input.running) blockers.push('Wait for the running evaluation to finish, or cancel it from Results.');
   return blockers.map(text => mediaText(text, input.profile.stage));

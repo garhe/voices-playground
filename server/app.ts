@@ -4,24 +4,34 @@ import path from 'node:path';
 import { z, ZodError } from 'zod';
 import {
   clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
-  type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs,
-  rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, type Rubric,
+  type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs, evaluationWorkspace,
+  rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, ARENA_RUBRIC, BUILT_IN_RUBRIC_IDS, DEFAULT_JUDGE_DEPLOYMENTS, type Rubric,
 } from '../shared/domain.js';
 import { measurements, wav } from './audio.js';
 import { judgeAudio, JudgeAudioError, testRealtimeConnection } from './realtime.js';
 import { Store } from './store.js';
+import { QueueTiming } from './queueTiming.js';
 import { Connection, type Credentials } from './credentials.js';
 import { testHistory, testMetadataSchema, canManageTest, type BulkTestResult } from '../shared/history.js';
 import { FolderSorting } from './sorting.js';
 import { BatchImport } from './batch.js';
+import { registerStudio } from './studio.js';
+import { registerScriptGeneration } from './scriptGeneration.js';
+import { ArenaImport } from './arena.js';
+import { arenaData, arenaReferenceSchema, arenaSettingsSchema } from '../shared/arena.js';
 
 const uuid = z.string().uuid();
+const CLIP_READ_BATCH_SIZE = 32;
+const LARGE_JOB_CHECKPOINT_BATCH_SIZE = 25;
 const message = (error: unknown) => error instanceof Error ? error.message : 'Unexpected evaluation failure.';
+class EvaluationSaveError extends Error {
+  constructor(cause: unknown) { super(message(cause), { cause }); }
+}
 function evaluationResults(job: Job): JudgeResult[] {
   const selection = job.retrySelection;
-  return selection
-    ? job.results.filter(result => selection.some(selected => selected.clipId === result.clipId && selected.judgeId === result.judgeId))
-    : job.results;
+  if (!selection) return job.results;
+  const keys = new Set(selection.map(({ clipId, judgeId }) => JSON.stringify([clipId, judgeId])));
+  return job.results.filter(({ clipId, judgeId }) => keys.has(JSON.stringify([clipId, judgeId])));
 }
 function unassessedResults(job: Job, file?: string): JudgeResult[] {
   return unassessedInputs(job).filter(input => !file || input.clip.file === file)
@@ -30,8 +40,9 @@ function unassessedResults(job: Job, file?: string): JudgeResult[] {
     }));
 }
 function prepareRetry(job: Job, selected: JudgeResult[]) {
+  const existing = new Set(job.results);
   for (const result of selected) {
-    if (job.results.includes(result)) {
+    if (existing.has(result)) {
       const { clipId: _clipId, judgeId: _judgeId, previousEvaluations, ...evaluation } = result;
       result.previousEvaluations = [...(previousEvaluations ?? []), { ...evaluation, retriedAt: new Date().toISOString() }];
     } else job.results.push(result);
@@ -43,17 +54,23 @@ function prepareRetry(job: Job, selected: JudgeResult[]) {
 const jobRequest = z.object({
   name: testNameSchema,
   profile: profileSchema,
-  clipIds: z.array(uuid).min(1).max(200),
+  clipIds: z.array(uuid).min(1),
   clipOverrides: z.array(z.object({
     id: uuid, voice: z.string().trim().min(1).max(200), language: languageHintSchema,
-  })).max(200).optional(),
+  })).optional(),
   consent: z.literal(true),
   enqueue: z.boolean().optional(),
   autoRetry: z.boolean().optional(),
   judges: settingsSchema.innerType().shape.judges.optional(),
+  arena: arenaReferenceSchema.optional(),
+  voiceLabels: testMetadataSchema.innerType().shape.voiceLabels.optional(),
 }).refine(r => new Set(r.clipIds).size === r.clipIds.length, 'Clip IDs must be unique.')
-  .refine(r => !r.clipOverrides || (new Set(r.clipOverrides.map(c => c.id)).size === r.clipOverrides.length &&
-    r.clipOverrides.every(c => r.clipIds.includes(c.id))), 'Clip overrides must be unique and refer to selected clips.');
+  .refine(r => {
+    if (!r.clipOverrides) return true;
+    const clipIds = new Set(r.clipIds);
+    return new Set(r.clipOverrides.map(c => c.id)).size === r.clipOverrides.length &&
+      r.clipOverrides.every(c => clipIds.has(c.id));
+  }, 'Clip overrides must be unique and refer to selected clips.');
 const bulkJobRequest = z.object({
   action: z.enum(['delete', 'redo']), ids: z.array(uuid).min(1), consent: z.literal(true).optional(),
 }).strict().refine(value => new Set(value.ids).size === value.ids.length, 'Test IDs must be unique.')
@@ -66,7 +83,10 @@ export function validateScope(profile: Profile, clips: StoredClip[]) {
 
 export async function createApp(options: {
   dataDir: string; endpoint?: string; key?: string; deployments?: string;
-  evaluate?: typeof judgeAudio; testConnection?: typeof testRealtimeConnection; port?: number;
+  clipConcurrency?: 1 | 2;
+  saveRetryDelayMs?: number;
+  scriptDeployment?: string; scriptFetch?: typeof fetch;
+  evaluate?: typeof judgeAudio; testConnection?: typeof testRealtimeConnection; speechFetch?: typeof fetch; port?: number;
 }) {
   const store = new Store(options.dataDir);
   await store.init();
@@ -80,7 +100,7 @@ export async function createApp(options: {
   }
   settingsSchema.parse(await store.settings());
   const rubricLibrarySchema = z.array(rubricSchema).refine(items =>
-    new Set([DEFAULT_RUBRIC.id, ...items.map(item => item.id)]).size === items.length + 1, 'Rubric IDs must be unique and must not replace the built-in default.');
+    new Set([...BUILT_IN_RUBRIC_IDS, ...items.map(item => item.id)]).size === items.length + BUILT_IN_RUBRIC_IDS.length, 'Rubric IDs must be unique and must not replace a built-in rubric.');
   let rubrics = await store.exists('rubrics.json') ? rubricLibrarySchema.parse(await store.read('rubrics.json')) : [];
   let rubricWrite = false;
   const savedJobs = await store.jobs();
@@ -110,10 +130,13 @@ export async function createApp(options: {
   const app = express();
   app.disable('x-powered-by');
   let active: { job: Job; controller: AbortController } | undefined;
+  let activeTiming: { rate: QueueTiming; selected: JudgeResult[] } | undefined;
   const waiting = savedJobs.filter(job => job.status === 'queued')
     .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.createdAt.localeCompare(b.createdAt));
   let queuePaused = waiting.length > 0;
   let queueError: string | undefined;
+  let saveRecovery: { jobId: string; detail: string; attempts: number; memoryOnly: boolean } | undefined;
+  let saveRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let dispatching = false;
   let queuedWrites = 0;
   const changingJobs = new Set<string>();
@@ -123,28 +146,67 @@ export async function createApp(options: {
   let connectionWrite = false;
   let testingConnection = false;
   function queueState(): TestQueueState {
+    const current = activeTiming?.selected.filter(result => result.status === 'pending' || result.status === 'running').length ?? 0;
+    const queued = activeTiming && !queuePaused ? waiting.reduce((count, job) =>
+      count + evaluationResults(job).filter(result => result.status !== 'completed').length, 0) : 0;
     return {
-      paused: queuePaused, error: queueError,
-      active: active ? { id: active.job.id, name: evaluationName(active.job), retry: active.job.retrySelection ? true : undefined, autoRetryCount: active.job.autoRetryCount } : undefined,
-      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), retry: job.retrySelection ? true : undefined, autoRetryCount: job.autoRetryCount })),
+      paused: queuePaused,
+      error: queueError ?? (saveRecovery ? `${saveRecovery.detail} ${queuePaused
+        ? 'Automatic save retry is paused. Select Start queue to continue.'
+        : 'Retrying the local save automatically. No later test will start before this one.'}` : undefined),
+      recoveringSave: !!saveRecovery && !queuePaused && !queueError,
+      eta: activeTiming?.rate.minutesLeft(performance.now(), current, queued, queuePaused) ?? {},
+      active: active ? { id: active.job.id, name: evaluationName(active.job), workspace: evaluationWorkspace(active.job), retry: active.job.retrySelection ? true : undefined, autoRetryCount: active.job.autoRetryCount } : undefined,
+      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), workspace: evaluationWorkspace(job), retry: job.retrySelection ? true : undefined, autoRetryCount: job.autoRetryCount })),
     };
   }
+  function clearSaveRetryTimer() {
+    clearTimeout(saveRetryTimer);
+    saveRetryTimer = undefined;
+  }
+  function retryQueueSave(job: Job, error: unknown, checkpoint?: 'saved' | 'memory-only') {
+    const previous = saveRecovery?.jobId === job.id ? saveRecovery : undefined;
+    const attempts = (previous?.attempts ?? 0) + 1;
+    const memoryOnly = checkpoint === undefined ? previous?.memoryOnly ?? false : checkpoint === 'memory-only';
+    const detail = `Could not save "${evaluationName(job)}": ${connection.redact(error)}.${
+      memoryOnly ? ' The latest checkpoint is in memory; keep the server running.' : ''}`;
+    saveRecovery = { jobId: job.id, detail, attempts, memoryOnly };
+    console.warn(detail);
+    if (!previous) void store.recordQueueSaveRetry(job.id, checkpoint ? { phase: 'running', checkpoint } : { phase: 'starting' });
+    if (queuePaused) return;
+    clearSaveRetryTimer();
+    const delay = Math.min((options.saveRetryDelayMs ?? 5000) * 2 ** Math.min(attempts - 1, 3), 30000);
+    saveRetryTimer = setTimeout(() => {
+      saveRetryTimer = undefined;
+      void drainQueue();
+    }, delay);
+    saveRetryTimer.unref();
+  }
   async function drainQueue() {
-    if (active || dispatching || queuedWrites || queuePaused || !waiting.length) return;
+    if (active || dispatching || queuedWrites || queuePaused || saveRetryTimer || !waiting.length) return;
     dispatching = true;
     let next: Job | undefined;
     try {
       const credentials = connection.current();
-      next = waiting.shift()!;
+      const recoveryIndex = saveRecovery ? waiting.findIndex(job => job.id === saveRecovery?.jobId) : -1;
+      [next] = waiting.splice(Math.max(0, recoveryIndex), 1);
       const controller = new AbortController();
       next.status = 'running'; active = { job: next, controller };
       await store.saveJob(next);
+      if (saveRecovery?.jobId === next.id) saveRecovery = undefined;
       void run(next, controller, credentials);
     } catch (error) {
+      if (next) {
+        next.status = 'queued'; waiting.unshift(next); active = undefined;
+        if (next.autoRetry) {
+          retryQueueSave(next, error);
+          return;
+        }
+        void store.recordSavePause(next.id, { phase: 'starting' });
+      }
       queuePaused = true;
       queueError = `Queue paused: ${connection.redact(error)}. Resolve the problem and start the queue again.`;
       console.error(queueError);
-      if (next) { next.status = 'queued'; waiting.unshift(next); active = undefined; }
     } finally { dispatching = false; }
   }
   function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips' | 'autoRetry'>, enqueue: boolean): Job {
@@ -153,12 +215,18 @@ export async function createApp(options: {
       profile: { ...input.profile, rubric: input.profile.rubric ?? structuredClone(DEFAULT_RUBRIC) },
       rubric: RUBRIC_VERSION,
       autoRetry: input.autoRetry ?? true,
+      collectVoiceDescriptors: true,
       results: input.clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
   }
+  const firstQueueOrder = () => Math.min(0, ...waiting.map(queued => queued.queueOrder ?? 0)) - 1;
+  async function saveEvaluation(job: Job) {
+    try { await store.saveJob(job); }
+    catch (error) { throw new EvaluationSaveError(error); }
+  }
   async function enqueueEvaluation(job: Job, first = false) {
-    job.queueOrder = first ? Math.min(0, ...waiting.map(queued => queued.queueOrder ?? 0)) - 1 : ++queueOrder;
-    await store.saveJob(job);
+    job.queueOrder = first ? firstQueueOrder() : ++queueOrder;
+    await saveEvaluation(job);
     waiting.push(job); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!);
   }
   function ensureChangeable(id: string) {
@@ -189,6 +257,23 @@ export async function createApp(options: {
   app.use(express.json({ limit: '9mb' }));
   const folderSorting = new FolderSorting(options.dataDir);
   const batchImport = new BatchImport();
+  const arenaImport = new ArenaImport();
+  const studio = await registerStudio(app, store, options.speechFetch);
+  registerScriptGeneration(app, { connection, store, studio, defaultDeployment: options.scriptDeployment, fetchText: options.scriptFetch });
+  app.get('/api/arena', async (_req, res) => res.json(arenaData(await store.jobs())));
+  app.get('/api/arena/settings', async (_req, res) => res.json(
+    await store.exists('arena-settings.json') ? await store.read('arena-settings.json') : await store.settings(),
+  ));
+  app.put('/api/arena/settings', async (req, res) => {
+    const settings = arenaSettingsSchema.parse(req.body);
+    await store.save('arena-settings.json', settings);
+    res.json(settings);
+  });
+  app.post('/api/arena/preview', async (req, res) => res.json(await arenaImport.plan(req.body)));
+  app.post('/api/arena/uploads/preview', async (req, res) => res.json(await arenaImport.planUploads(req.body)));
+  app.get('/api/arena/:token/audio/:id', async (req, res) => {
+    res.type('application/octet-stream').send(await arenaImport.audio(uuid.parse(req.params.token), uuid.parse(req.params.id)));
+  });
   app.post('/api/batch/preview', async (req, res) => res.json(await batchImport.plan(req.body)));
   app.get('/api/batch/:token/audio/:id', async (req, res) => {
     const audio = await batchImport.audio(uuid.parse(req.params.token), uuid.parse(req.params.id));
@@ -205,7 +290,7 @@ export async function createApp(options: {
     rubricWrite = true;
     try {
       const content = rubricContentSchema.parse(req.body);
-      if ([DEFAULT_RUBRIC, ...rubrics].some(item => item.name.toLowerCase() === content.name.toLowerCase())) {
+      if ([DEFAULT_RUBRIC, ARENA_RUBRIC, ...rubrics].some(item => item.name.toLowerCase() === content.name.toLowerCase())) {
         res.status(409).json({ error: 'A rubric with this name already exists. Enter a different name for the new preset.' }); return;
       }
       const rubric = rubricSchema.parse({ ...content, id: randomUUID(), revision: 1 });
@@ -224,7 +309,7 @@ export async function createApp(options: {
       const previous = rubrics.find(item => item.id === id);
       if (!previous) { res.status(404).json({ error: 'This rubric preset no longer exists. Refresh the presets.' }); return; }
       if (input.revision !== previous.revision) { res.status(409).json({ error: 'This rubric was changed in another window. Refresh the presets before saving again.' }); return; }
-      if ([DEFAULT_RUBRIC, ...rubrics].some(item => item.id !== id && item.name.toLowerCase() === input.name.toLowerCase())) {
+      if ([DEFAULT_RUBRIC, ARENA_RUBRIC, ...rubrics].some(item => item.id !== id && item.name.toLowerCase() === input.name.toLowerCase())) {
         res.status(409).json({ error: 'A rubric with this name already exists. Enter a different rubric name.' }); return;
       }
       const rubric: Rubric = rubricSchema.parse({ ...input, id, revision: previous.revision + 1 });
@@ -313,7 +398,8 @@ export async function createApp(options: {
   });
   app.get('/api/jobs', async (_req, res) => {
     const jobs = await store.jobs();
-    res.json(jobs.map(j => testHistory(active?.job.id === j.id ? active.job : j)));
+    const queued = new Map(waiting.map(job => [job.id, job]));
+    res.json(jobs.map(j => testHistory(active?.job.id === j.id ? active.job : queued.get(j.id) ?? j)));
   });
   app.post('/api/jobs/bulk', async (req, res) => {
     const input = bulkJobRequest.parse(req.body);
@@ -334,12 +420,13 @@ export async function createApp(options: {
             if (!canManageTest(source)) throw new Error('This test is running or queued. Wait or cancel it before redoing.');
             const profile = profileSchema.parse(source.profile);
             const { judges } = settingsSchema.parse({ judges: source.judges });
-            if (!source.clips.length || source.clips.length > 200) throw new Error('Redo requires 1-200 saved audio inputs. Use Edit inputs to prepare a new test.');
+            if (!source.clips.length) throw new Error('Redo requires saved audio inputs. Use Edit inputs to prepare a new test.');
             const clips = source.clips.map(clip => ({ ...clip, ...clipSchema.parse(clip) }));
             validateScope(profile, clips);
             for (const clip of clips)
               if (!await store.hasPcm(clip.id)) throw new Error(`Saved audio is unavailable for ${clip.file}. Import the original recording again.`);
             const job = newEvaluation({ name: evaluationName(source), profile, judges, clips }, true);
+            if (source.arena) job.arena = structuredClone(source.arena);
             if (source.voiceLabels) job.voiceLabels = source.voiceLabels.map(label => ({ ...label }));
             await enqueueEvaluation(job);
             result.succeeded.push({ id, newId: job.id });
@@ -360,17 +447,18 @@ export async function createApp(options: {
   });
   app.get('/api/queue', (_req, res) => res.json(queueState()));
   app.post('/api/queue/pause', (_req, res) => {
-    queuePaused = true; res.json(queueState());
+    queuePaused = true; clearSaveRetryTimer(); res.json(queueState());
   });
   app.post('/api/queue/start', async (req, res) => {
     z.object({ consent: z.literal(true) }).parse(req.body);
     connection.current();
+    clearSaveRetryTimer();
     queuePaused = false; queueError = undefined;
     await drainQueue(); res.json(queueState());
   });
   app.get('/api/jobs/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    res.json(active?.job.id === id ? active.job : await store.read<Job>(path.join('jobs', `${id}.json`)));
+    res.json(active?.job.id === id ? active.job : waiting.find(job => job.id === id) ?? await store.read<Job>(path.join('jobs', `${id}.json`)));
   });
   app.get('/api/jobs/:id/draft', async (req, res) => {
     const id = uuid.parse(req.params.id);
@@ -404,57 +492,141 @@ export async function createApp(options: {
     res.json({ deleted: id });
   });
   async function run(job: Job, controller: AbortController, credentials: Credentials, selected = evaluationResults(job)) {
+    const rate = new QueueTiming(performance.now());
+    activeTiming = { rate, selected };
     try {
       if (job.rubric !== RUBRIC_VERSION) throw new Error('The rubric changed. Create a new evaluation with the current rubric.');
-      for (const clip of job.clips) {
-        if (controller.signal.aborted) break;
-        if (!selected.some(r => r.clipId === clip.id && r.status !== 'completed')) continue;
-        const pcm = await store.pcm(clip.id);
-        const tasks = job.judges.map(async judge => {
-          const result = job.results.find(r => r.clipId === clip.id && r.judgeId === judge.id)!;
-          if (!selected.includes(result) || result.status === 'completed') return;
-          if (controller.signal.aborted) { result.status = 'cancelled'; return; }
-          result.status = 'running'; delete result.error; delete result.responseFormat;
-          delete result.assessment; delete result.model; delete result.audioDiagnostics;
-          await store.saveJob(job);
-          if (controller.signal.aborted) { result.status = 'cancelled'; return; }
-          try {
-            const output = await evaluate({
-              ...credentials, judge, pcm, role: clip.role,
-              profile: { ...job.profile, language: resolveLanguageHint(clip.language, job.profile.language) }, signal: controller.signal,
-            });
-            result.assessment = output.assessment; result.model = output.model; result.status = 'completed';
-            result.responseFormat = output.responseFormat;
-            result.audioDiagnostics = output.audioDiagnostics;
-            if (output.responseFormat === 'function_call_with_preamble')
-              console.warn(`Judge ${judge.name} returned a validated function with a non-assessment preamble; the preamble was ignored, not scored.`);
-            else if (output.responseFormat && output.responseFormat !== 'function_call')
-              console.warn(`Judge ${judge.name} returned ${output.responseFormat} instead of a function call; accepted after full assessment validation.`);
-          } catch (error) {
-            result.status = controller.signal.aborted ? 'cancelled' : 'failed';
-            result.error = connection.redact(error);
-            if (error instanceof JudgeAudioError) {
-              result.audioDiagnostics = error.audioDiagnostics;
-              for (const session of result.audioDiagnostics.sessions)
-                if (session.error) session.error = connection.redact(new Error(session.error));
-            }
-            console.error(`Judge ${judge.name} failed for clip ${clip.id}: ${result.error}`);
-          }
-          await store.saveJob(job);
-        });
-        try { await Promise.all(tasks); }
-        catch (error) {
-          controller.abort();
-          await Promise.allSettled(tasks);
-          throw error;
-        }
+      const byClip = new Map<string, Map<string, JudgeResult>>();
+      for (const result of selected) {
+        if (result.status === 'completed') continue;
+        const byJudge = byClip.get(result.clipId) ?? new Map<string, JudgeResult>();
+        byJudge.set(result.judgeId, result);
+        byClip.set(result.clipId, byJudge);
       }
+      const batchCheckpoints = job.clips.length > 200;
+      let completedSinceSave = 0;
+      let lastSave = Date.now();
+      let checkpoint: Promise<void> | undefined;
+      let failure: { error: unknown } | undefined;
+      function stopWorkers(error: unknown) {
+        failure ??= { error };
+        controller.abort();
+      }
+      async function scoreJudge(clip: StoredClip, judge: Job['judges'][number], result: JudgeResult, pcm: Buffer) {
+        if (controller.signal.aborted) { result.status = 'cancelled'; return; }
+        result.status = 'running'; delete result.error; delete result.responseFormat;
+        delete result.assessment; delete result.model; delete result.audioDiagnostics;
+        if (!batchCheckpoints) await saveEvaluation(job);
+        if (controller.signal.aborted) { result.status = 'cancelled'; return; }
+        try {
+          const output = await evaluate({
+            ...credentials, judge, pcm, role: clip.role,
+            collectVoiceDescriptors: job.collectVoiceDescriptors === true,
+            profile: { ...job.profile, language: resolveLanguageHint(clip.language, job.profile.language) }, signal: controller.signal,
+          });
+          result.assessment = output.assessment; result.model = output.model; result.status = 'completed';
+          result.responseFormat = output.responseFormat;
+          result.audioDiagnostics = output.audioDiagnostics;
+          if (output.responseFormat === 'function_call_with_preamble')
+            console.warn(`Judge ${judge.name} returned a validated function with a non-assessment preamble; the preamble was ignored, not scored.`);
+          else if (output.responseFormat && output.responseFormat !== 'function_call')
+            console.warn(`Judge ${judge.name} returned ${output.responseFormat} instead of a function call; accepted after full assessment validation.`);
+        } catch (error) {
+          result.status = controller.signal.aborted ? 'cancelled' : 'failed';
+          result.error = connection.redact(error);
+          if (error instanceof JudgeAudioError) {
+            result.audioDiagnostics = error.audioDiagnostics;
+            for (const session of result.audioDiagnostics.sessions)
+              if (session.error) session.error = connection.redact(new Error(session.error));
+          }
+          console.error(`Judge ${judge.name} failed for clip ${clip.id}: ${result.error}`);
+        }
+        if (!controller.signal.aborted) rate.record(performance.now());
+        if (!batchCheckpoints) await saveEvaluation(job);
+      }
+      async function checkpointAfterWork(limit: number) {
+        if (!batchCheckpoints) return;
+        completedSinceSave++;
+        if (!checkpoint && (completedSinceSave >= limit || Date.now() - lastSave >= 5000)) {
+          completedSinceSave = 0;
+          checkpoint = saveEvaluation(job).finally(() => { checkpoint = undefined; lastSave = Date.now(); });
+        }
+        if (checkpoint) await checkpoint;
+      }
+      async function guarded(work: () => Promise<void>) {
+        try { await work(); }
+        catch (error) { stopWorkers(error); }
+      }
+      if (options.clipConcurrency === 2) {
+        // Share overlapping reads without retaining audio for clips that slower judges have not reached yet.
+        const reads = new Map<string, Promise<Buffer>>();
+        function readAudio(id: string) {
+          let pcm = reads.get(id);
+          if (!pcm) {
+            pcm = store.pcm(id).finally(() => { reads.delete(id); });
+            reads.set(id, pcm);
+          }
+          return pcm;
+        }
+        const checkpointLimit = LARGE_JOB_CHECKPOINT_BATCH_SIZE * job.judges.length;
+        const totalSlots = 2 * job.judges.length;
+        const maxSlotsPerJudge = 6;
+        const lanes = job.judges.map(judge => ({
+          judge, running: 0, next: 0,
+          pending: job.clips.flatMap(clip => {
+            const result = byClip.get(clip.id)?.get(judge.id);
+            return result ? [{ clip, result }] : [];
+          }),
+        }));
+        await new Promise<void>(resolve => {
+          let running = 0;
+          function fillSlots() {
+            while (!controller.signal.aborted && running < totalSlots) {
+              let lane: typeof lanes[number] | undefined;
+              for (const candidate of lanes) {
+                if (candidate.next < candidate.pending.length && candidate.running < maxSlotsPerJudge &&
+                    (!lane || candidate.running < lane.running)) lane = candidate;
+              }
+              if (!lane) break;
+              const assigned = lane;
+              const { clip, result } = assigned.pending[assigned.next++];
+              assigned.running++;
+              running++;
+              void guarded(async () => {
+                await scoreJudge(clip, assigned.judge, result, await readAudio(clip.id));
+                await checkpointAfterWork(checkpointLimit);
+              }).then(() => {
+                assigned.running--;
+                running--;
+                fillSlots();
+              });
+            }
+            if (!running) resolve();
+          }
+          fillSlots();
+        });
+      } else {
+        await guarded(async () => {
+          for (const clip of job.clips) {
+            if (controller.signal.aborted) break;
+            const results = byClip.get(clip.id);
+            if (!results) continue;
+            const pcm = await store.pcm(clip.id);
+            await Promise.all(job.judges.map(judge => guarded(async () => {
+              const result = results.get(judge.id);
+              if (result) await scoreJudge(clip, judge, result, pcm);
+            })));
+            if (!failure) await checkpointAfterWork(LARGE_JOB_CHECKPOINT_BATCH_SIZE);
+          }
+        });
+      }
+      if (failure) throw failure.error;
       const status = controller.signal.aborted ? 'cancelled' : 'completed';
       for (const r of selected) if (r.status === 'pending' || r.status === 'running') {
         r.status = 'cancelled'; r.error = 'Evaluation cancelled before completion.';
       }
       delete job.retrySelection;
-      await store.saveJob({ ...job, status });
+      await saveEvaluation({ ...job, status });
       job.status = status;
       if (status === 'completed' && job.autoRetry) {
         const remaining = unassessedResults(job);
@@ -466,6 +638,26 @@ export async function createApp(options: {
         }
       }
     } catch (error) {
+      if (error instanceof EvaluationSaveError && job.autoRetry) {
+        const remaining = job.status === 'queued' ? evaluationResults(job) : selected;
+        const unfinished = remaining.filter(r => ['running', 'pending', 'cancelled'].includes(r.status));
+        if (job.status !== 'queued') prepareRetry(job, unfinished);
+        const held = { ...job, status: 'queued' as const, queueOrder: firstQueueOrder() };
+        let saved = true;
+        try { await store.saveJob(held); }
+        catch (saveError) {
+          saved = false;
+          console.error('Could not persist paused evaluation:', connection.redact(saveError));
+        }
+        if (job.autoRetry) {
+          waiting.push(held);
+          waiting.sort((a, b) => a.queueOrder! - b.queueOrder!);
+          retryQueueSave(held, error, saved ? 'saved' : 'memory-only');
+          return;
+        }
+        // A cancellation can arrive while the held checkpoint is being written.
+        selected = unfinished;
+      }
       runtimeError = `Evaluation interrupted: ${connection.redact(error)}`;
       console.error(runtimeError);
       for (const r of selected) if (r.status === 'pending' || r.status === 'running') {
@@ -475,6 +667,7 @@ export async function createApp(options: {
       catch (saveError) { console.error('Could not persist interrupted state:', message(saveError)); }
       job.status = 'interrupted';
     } finally {
+      activeTiming = undefined;
       active = undefined;
       void drainQueue();
     }
@@ -488,21 +681,36 @@ export async function createApp(options: {
     try {
       const credentials = connection.current();
       const settings = settingsSchema.parse(input.judges ? { judges: input.judges } : await store.settings());
-      const clips = await Promise.all(input.clipIds.map(async id => {
-        const clip = await store.clip(id);
-        const override = input.clipOverrides?.find(c => c.id === id);
-        if (!await store.hasPcm(id)) throw new Error(`Saved audio is unavailable for ${clip.file}. Import the original recording again.`);
-        return {
-          ...clip, ...(override ? { voice: override.voice } : {}),
-          language: resolveLanguageHint(override?.language ?? clip.language, input.profile.language),
-        };
-      }));
+      const overrides = new Map(input.clipOverrides?.map(override => [override.id, override]));
+      const clips: StoredClip[] = [];
+      for (let offset = 0; offset < input.clipIds.length; offset += CLIP_READ_BATCH_SIZE) {
+        const batch = await Promise.all(input.clipIds.slice(offset, offset + CLIP_READ_BATCH_SIZE).map(async id => {
+          const clip = await store.clip(id);
+          const override = overrides.get(id);
+          if (!await store.hasPcm(id)) throw new Error(`Saved audio is unavailable for ${clip.file}. Import the original recording again.`);
+          return {
+            ...clip, ...(override ? { voice: override.voice } : {}),
+            language: resolveLanguageHint(override?.language ?? clip.language, input.profile.language),
+          };
+        }));
+        clips.push(...batch);
+      }
       validateScope(input.profile, clips);
+      const arena = input.arena ? arenaImport.metadata(input.arena, clips) : undefined;
+      if (arena && (input.profile.stage !== 'tts' || input.profile.scope !== 'single' ||
+          input.profile.language !== arena.locale || input.profile.targetMarket !== arena.locale ||
+          clips.some(clip => clip.language !== arena.locale)))
+        throw new Error('Arena requires TTS single-speaker evaluation with the script locale as language/accent for all audio.');
       // Recheck after asynchronous reads so two requests cannot start concurrent runs.
       if (!input.enqueue && (active || dispatching || queuedWrites || waiting.length)) {
         res.status(409).json({ error: 'Another evaluation is running or queued. Add this test to the queue instead.' }); return;
       }
       const job = newEvaluation({ name: input.name, profile: input.profile, judges: settings.judges, clips, autoRetry: input.autoRetry }, !!input.enqueue);
+      if (arena) job.arena = arena;
+      if (input.voiceLabels?.some(label => !clips.some(clip => clip.voice === label.voice)))
+        throw new Error('Voice gender labels must refer to evaluated voices.');
+      if (input.voiceLabels) job.voiceLabels = input.voiceLabels;
+      else if (input.arena) job.voiceLabels = arenaImport.labels(input.arena);
       if (input.enqueue) {
         await enqueueEvaluation(job);
         res.status(201).json(job);
@@ -527,17 +735,22 @@ export async function createApp(options: {
       const [job] = waiting.splice(index, 1);
       const original = structuredClone(job);
       changingJobs.add(id);
+      queuedWrites++;
       job.status = 'cancelled';
       job.autoRetry = false; delete job.retryAfter;
       for (const result of evaluationResults(job)) {
         result.status = 'cancelled'; result.error = 'Cancelled before the queued test started.';
       }
-      try { await store.saveJob(job); res.json({ status: 'cancelled' }); }
+      try {
+        await store.saveJob(job);
+        if (saveRecovery?.jobId === id) { saveRecovery = undefined; clearSaveRetryTimer(); }
+        res.json({ status: 'cancelled' });
+      }
       catch (error) {
         waiting.push(original); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!); queuePaused = true;
         queueError = `Queue paused: cancellation could not be saved. ${connection.redact(error)}`;
         console.error(queueError); throw error;
-      } finally { changingJobs.delete(id); }
+      } finally { changingJobs.delete(id); queuedWrites--; void drainQueue(); }
       return;
     }
     if (!active || active.job.id !== id) { res.status(409).json({ error: 'This evaluation is not running.' }); return; }
@@ -614,5 +827,5 @@ export async function createApp(options: {
     }
     res.status(400).json({ error: connection.redact(error) });
   };
-  return { app, errors, store, cancelActive: () => { queuePaused = true; active?.controller.abort(); } };
+  return { app, errors, store, cancelActive: () => { queuePaused = true; clearSaveRetryTimer(); active?.controller.abort(); } };
 }

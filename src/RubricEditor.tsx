@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { BOTH_SPEAKERS_TEST_GUIDE, DEFAULT_RUBRIC, labels, rubricSchema, profileRubric, type Dimension, type Profile, type Rubric } from '../shared/domain';
+import { BOTH_SPEAKERS_TEST_GUIDE, BUILT_IN_RUBRIC_IDS, DEFAULT_RUBRIC, labels, rubricSchema, profileRubric, type Dimension, type Profile, type Rubric } from '../shared/domain';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { rubricHasChanges } from './readiness';
 
-export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSave, onDelete, onRefresh }: {
-  profile: Profile; presets?: Rubric[]; busy: boolean;
+export function RubricEditor({ profile, presets, busy, stages = ['audition', 'tts'], onChange, onSelect, onSave, onDelete, onRefresh }: {
+  profile: Profile; presets?: Rubric[]; busy: boolean; stages?: readonly Profile['stage'][];
   onChange: (rubric: Rubric) => void; onSelect: (rubric: Rubric) => void;
   onSave: (rubric: Rubric, copy: boolean) => void; onDelete: (rubric: Rubric) => void; onRefresh: () => void;
 }) {
@@ -16,7 +16,7 @@ export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSav
   const dirty = rubricHasChanges(rubric, stored);
   const validation = rubricSchema.safeParse(rubric);
   const canCopy = !library.some(item => item.name.toLowerCase() === rubric.name.trim().toLowerCase());
-  const canUpdate = stored && stored.id !== DEFAULT_RUBRIC.id && stored.revision === rubric.revision;
+  const canUpdate = stored && !BUILT_IN_RUBRIC_IDS.includes(stored.id) && stored.revision === rubric.revision;
   const disabled = busy || !presets;
   function change(patch: Partial<Rubric>) { onChange({ ...rubric, ...patch }); }
   function select(next: Rubric) { setEditing(undefined); onSelect(next); }
@@ -29,7 +29,7 @@ export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSav
         else select(next);
       }}>
         {!stored && <option value={rubric.id}>Saved snapshot · {rubric.name}</option>}
-        {library.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === DEFAULT_RUBRIC.id ? ' (built-in default)' : ` · revision ${item.revision}`}</option>)}
+        {library.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === DEFAULT_RUBRIC.id ? ' (built-in default)' : BUILT_IN_RUBRIC_IDS.includes(item.id) ? ' (built-in)' : ` · revision ${item.revision}`}</option>)}
       </select>
     </label>
     {dirty && <p className="hint" role="status">Unsaved rubric edits apply to this test's snapshot. Save a preset to reuse them in other tests.</p>}
@@ -74,10 +74,10 @@ export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSav
                   onClick={() => setEditing({ id: dimension.id, original: dimension.label })}>{title.charAt(0).toUpperCase() + title.slice(1)}</button>}
             </span></legend>
             <div className="rubric-stages">
-              <label className="checkbox-label"><input type="checkbox" aria-label={`${labels[dimension.id]} Voice Selection inclusion`} checked={dimension.weights.audition > 0} disabled={!dimension.enabled}
-                onChange={event => update({ weights: { ...dimension.weights, audition: event.target.checked ? 1 : 0 } })} /> Voice Selection</label>
-              <label className="checkbox-label"><input type="checkbox" aria-label={`${labels[dimension.id]} TTS inclusion`} checked={dimension.weights.tts > 0} disabled={!dimension.enabled}
-                onChange={event => update({ weights: { ...dimension.weights, tts: event.target.checked ? 1 : 0 } })} /> TTS</label>
+              {stages.includes('audition') && <label className="checkbox-label"><input type="checkbox" aria-label={`${labels[dimension.id]} Voice Selection inclusion`} checked={dimension.weights.audition > 0} disabled={!dimension.enabled}
+                onChange={event => update({ weights: { ...dimension.weights, audition: event.target.checked ? 1 : 0 } })} /> Voice Selection</label>}
+              {stages.includes('tts') && <label className="checkbox-label"><input type="checkbox" aria-label={`${labels[dimension.id]} TTS inclusion`} checked={dimension.weights.tts > 0} disabled={!dimension.enabled}
+                onChange={event => update({ weights: { ...dimension.weights, tts: event.target.checked ? 1 : 0 } })} /> TTS</label>}
             </div>
             <details><summary>Scoring description</summary><label>Criteria for {dimension.label || dimension.id}<textarea rows={3} value={dimension.description} maxLength={2000}
               onChange={event => update({ description: event.target.value })} /></label></details>
