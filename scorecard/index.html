@@ -1018,9 +1018,6 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     .shared-scorecard .multi-filter-popup label[hidden] { display: none; }
     .shared-scorecard .multi-filter-popup input[type=checkbox] { flex: none; }
     .dimension-table tbody th { white-space: normal; }
-    .voice-search { display: flex; align-items: end; flex-wrap: wrap; gap: .5rem 1rem; }
-    .voice-search label { flex: 1 1 16rem; max-width: 28rem; }
-    .voice-search input { width: 100%; }
     #issue-groups { display: grid; gap: .5rem; }
     .issue-voice, .issue-domain, .issue-locale { border: 1px solid var(--mica-border); border-radius: 8px; overflow-wrap: anywhere; }
     .issue-voice, .issue-locale { background: var(--mica-inset); }
@@ -1071,8 +1068,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   <p id="mixed" class="hint" hidden>This snapshot combines different judging panels, rubrics, or guides. Treat these scores as descriptive, not a controlled head-to-head comparison.</p>
   <section id="controls" class="card arena-card" aria-labelledby="filters-heading">
     <h2 id="filters-heading">Voice × language / accent</h2>
-    <div class="voice-search"><label for="voice-search">Search by voice<input id="voice-search" type="search" placeholder="e.g. Mariela or en-US"></label></div>
-    <p class="hint">Search and filters apply to all sections. Use the Voice menu to select multiple voices by name.</p>
+    <p class="hint">Filters apply to all sections. Use the Voice menu to find and select voices by name.</p>
     <div id="filters" class="field-row filter-bar"></div>
     <div class="section-with-action"><span id="matches" class="hint" role="status"></span><button id="reset" class="text-button" type="button">Reset filters</button></div>
     <noscript>This scorecard needs JavaScript to display its tables and filters.</noscript>
@@ -1154,7 +1150,6 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   const filterControls = [];
   const matrixSorts = new Map();
   let comparisonSort = { key: 'score', direction: -1 };
-  const voiceSearch = byId('voice-search');
 
   function el(tag, text, attrs = {}) {
     const node = document.createElement(tag);
@@ -1390,9 +1385,8 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   }
 
   function render() {
-    const query = voiceSearch.value.trim().toLowerCase();
-    const rows = data.cells.filter(cell => cell.voice.toLowerCase().includes(query)
-      && fields.every(([key]) => !selected.get(key).size || selected.get(key).has(cell[key])));
+    const rows = data.cells.filter(cell =>
+      fields.every(([key]) => !selected.get(key).size || selected.get(key).has(cell[key])));
     for (const { key, trigger, clear, checkboxes } of filterControls) {
       const selection = selected.get(key);
       const count = selection.size;
@@ -1500,9 +1494,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   }
   addEventListener('scroll', updateOpenFilter, { passive: true });
   addEventListener('resize', updateOpenFilter);
-  voiceSearch.addEventListener('input', render);
   function resetFilters() {
-    voiceSearch.value = '';
     for (const selection of selected.values()) selection.clear();
     for (const { popup } of filterControls) popup.hidePopover();
     render();
