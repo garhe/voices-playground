@@ -1108,49 +1108,42 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   const data = JSON.parse(byId('scorecard-data').textContent);
   const labels = new Map(data.dimensions.map(({ id, label }) => [id, label]));
   const issueDescriptions = new Map([
-    ['naturalness', 'Speech may sound less natural or more synthetic.'],
-    ['articulation', 'Some sounds or words may be pronounced unclearly or inaccurately.'],
-    ['pace', 'Pacing may feel rushed, slow, or uneven.'],
-    ['expressiveness', 'The tone may sound flat or lack emotional variation.'],
-    ['contextFit', 'The delivery may not match the tone expected for this domain.'],
-    ['accentFit', 'The accent may not closely match the target locale.'],
-    ['audioQuality', 'The audio may sound less clear or clean.'],
+    ['naturalness', 'Robotic rhythm, abrupt pitch resets between phrases, or choppy transitions between words. Phrase endings may stop abruptly or linger unnaturally.'],
+    ['articulation', 'Dropped or blurred consonants, substituted vowels, or unclear syllables. Names, numbers, and abbreviations may be read incorrectly even when nearby words sound clear.'],
+    ['pace', 'Dense instructions may sound rushed, while simpler phrases drag. Pauses can split words that belong together or be too short between steps; speaking rate can also change abruptly mid-sentence.'],
+    ['expressiveness', 'Emotion: reassurance or concern may sound neutral or exaggerated. Emphasis: key words may get no extra stress, or the wrong word may stand out. Intensity: vocal energy may stay flat or jump suddenly. Pitch: questions and statements may use the same melody.'],
+    ['contextFit', 'The style may not match the purpose of the line: a greeting can sound formal, an apology cheerful, or an instruction overly casual. A shift from reassurance to action may sound abrupt.'],
+    ['accentFit', 'Vowels, consonants, or word stress may resemble a different regional variety. Sentence intonation may be unfamiliar for the locale; in tonal languages, pitch contours may blur word distinctions.'],
+    ['audioQuality', 'Audible hiss, clicks, distortion on loud sounds, or brief dropouts. The voice may sound metallic or muffled, or its loudness may shift unexpectedly between phrases.'],
   ]);
   const issueExperiments = new Map([
     ['naturalness', [
       'Collect clean, transcript-aligned speech in the target locale, covering short turns, questions, and multi-clause replies. Tag phrase boundaries.',
       'Fine-tune with more phrase-boundary examples while retaining general speech. Compare against the unchanged checkpoint.',
-      'Use blind paired listening on unseen text to rate naturalness and flag abrupt transitions or unnatural pauses.',
     ]],
     ['articulation', [
       'Build a locale-specific set of names, numbers, abbreviations, and confusable sounds. Have native reviewers verify spoken forms and phoneme labels.',
       'Test text normalization or grapheme-to-phoneme fixes first. If errors persist with correct phonemes, fine-tune with more examples of the affected sounds.',
-      'Measure target-word pronunciation errors on unseen entries and check that ordinary words remain correct.',
     ]],
     ['pace', [
       'Collect aligned examples across utterance lengths, speaking rates, and clause structures. Label pauses and dense sequences such as numbers or instructions.',
       'Train or fine-tune duration and pause prediction with better coverage of the weak cases. Keep the text front end fixed for the comparison.',
-      'Compare pause placement, duration, and listener comprehension on unseen short and long prompts.',
     ]],
     ['expressiveness', [
       'Collect consented target-locale speech with labels for intent, emphasis, and intensity. Include neutral and expressive readings of matched text where possible.',
       'Test style-conditioned fine-tuning with balanced intent coverage and a mix of neutral examples to preserve intelligibility and voice identity.',
-      'Run a blind A/B on unseen scripts with native listeners. Score intent recognition and appropriate emphasis; also check clarity and speaker similarity.',
     ]],
     ['contextFit', [
       'Build a locale-specific dataset tagged by domain and intent. For customer service, separate greetings, instructions, reassurance, and escalation.',
       'Compare domain/intent conditioning or a domain-balanced fine-tune against the same base model. Retain general-domain examples to limit regressions.',
-      'Use held-out scenarios and native listeners to rate appropriateness by intent. Include out-of-domain prompts to check for regressions.',
     ]],
     ['accentFit', [
       'Collect consented native target-locale speech across speakers and speaking styles. Verify locale labels and cover vowel, stress, or lexical-tone contrasts as applicable.',
       'Audit sampling by locale. Test locale conditioning or rebalance the target-locale data while holding speaker conditioning fixed.',
-      'Use native listeners and unseen contrast prompts to test locale fit, pronunciation, and preservation of voice identity.',
     ]],
     ['audioQuality', [
-      'Audit training audio for clipping, compression, noise, inconsistent sample rates, and transcript or segmentation errors. Keep a clean validation split.',
+      'Audit training audio for clipping, compression, noise, inconsistent sample rates, and transcript or segmentation errors.',
       'Compare raw synthesis with delivery output first. If artifacts are already present in raw audio, test a checkpoint trained on cleaned data or, if applicable, fine-tune the vocoder separately.',
-      'Use matched-loudness A/B listening and track artifact rates and intelligibility on held-out prompts.',
     ]],
   ]);
   const fields = [['voice', 'Voice'], ['domain', 'Domain'], ['locale', 'Language / accent'], ['model', 'Voice model'], ['gender', 'Gender']];
@@ -1255,11 +1248,13 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
       const issue = el('li');
       issue.append(el('strong', ratingLabel(item)));
       if (!note) {
-        issue.append(el('p', issueDescriptions.get(item.id)));
+        const symptoms = el('p');
+        symptoms.append(el('strong', 'Possible symptoms: '), issueDescriptions.get(item.id));
+        issue.append(symptoms);
         const experiment = issueExperiments.get(item.id);
         if (experiment) {
           const guidance = el('div', null, { class: 'issue-guidance' });
-          for (const [index, step] of ['Data to collect', 'Model experiment', 'How to validate'].entries()) {
+          for (const [index, step] of ['Data to collect', 'Model experiment'].entries()) {
             const row = el('p');
             row.append(el('strong', `${step}: `), experiment[index]);
             guidance.append(row);
@@ -1518,7 +1513,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   byId('close-detail').addEventListener('click', () => byId('detail').close());
   byId('snapshot').textContent = `Exported ${data.exportedOn} (UTC)`;
   byId('mixed').hidden = !data.mixedSettings;
-  byId('issues-note').textContent = `Open a voice and script locale to review dimensions below ${data.issueThreshold}/5, lowest first. Domain means weight each visible locale equally. The guidance proposes data collection, model experiments, and validation for TTS teams with training access. These are experiments to prioritize, not confirmed causes or clip-level findings.`;
+  byId('issues-note').textContent = `Open a voice and script locale to review dimensions below ${data.issueThreshold}/5, lowest first. Domain means weight each visible locale equally. Symptoms illustrate what each dimension can sound like; the scores do not identify which symptoms occurred. Data and model suggestions are for TTS teams with training access.`;
   render();
 </script>
 </body>
