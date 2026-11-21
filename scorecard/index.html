@@ -1035,7 +1035,8 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     .issue-locale-body { padding: 0 .85rem .75rem; }
     .issue-locale-body ol { margin: 0; padding-inline-start: 1.3rem; }
     .issue-locale-body li + li { margin-top: .65rem; }
-    .issue-locale-body .issue-action { margin-top: .2rem; }
+    .issue-guidance { margin: .35rem 0 0; padding-inline-start: .65rem; border-inline-start: 2px solid var(--mica-border); }
+    .issue-guidance p { margin: .15rem 0; }
     #detail { width: min(36rem, 94vw); max-height: 90vh; }
     #detail-title { overflow-wrap: anywhere; }
     #detail dt { font-weight: 650; }
@@ -1115,14 +1116,42 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     ['accentFit', 'The accent may not closely match the target locale.'],
     ['audioQuality', 'The audio may sound less clear or clean.'],
   ]);
-  const issueActions = new Map([
-    ['naturalness', 'Listen for stiff joins and abrupt pitch resets at phrase boundaries. A/B test a phrasing or pause change on the same text.'],
-    ['articulation', 'Have a native speaker check names, numbers, and abbreviations. Compare the default reading with locale-specific text normalization or a supported pronunciation override.'],
-    ['pace', 'Check pause placement and whether dense instructions are rushed. A/B test clause breaks or a small rate adjustment; check that the result stays easy to follow.'],
-    ['expressiveness', 'Compare the baseline with a version that emphasizes key words and varies pitch at phrase boundaries. For customer service, test whether reassurance sounds warmer while instructions stay clear.'],
-    ['contextFit', 'Define the intended tone for this domain, then compare style settings on the same prompts. For customer service, test greetings, instructions, and apologies separately with native listeners.'],
-    ['accentFit', 'Compare against native reference speech in the script locale. Check vowels, stress, and intonation, then test a locale-matched voice or supported locale setting.'],
-    ['audioQuality', 'Compare the raw synthesis with playback output at matched loudness. Check for clipping, dropouts, and codec artifacts to isolate synthesis from encoding or playback.'],
+  const issueExperiments = new Map([
+    ['naturalness', [
+      'Collect clean, transcript-aligned speech in the target locale, covering short turns, questions, and multi-clause replies. Tag phrase boundaries.',
+      'Fine-tune with more phrase-boundary examples while retaining general speech. Compare against the unchanged checkpoint.',
+      'Use blind paired listening on unseen text to rate naturalness and flag abrupt transitions or unnatural pauses.',
+    ]],
+    ['articulation', [
+      'Build a locale-specific set of names, numbers, abbreviations, and confusable sounds. Have native reviewers verify spoken forms and phoneme labels.',
+      'Test text normalization or grapheme-to-phoneme fixes first. If errors persist with correct phonemes, fine-tune with more examples of the affected sounds.',
+      'Measure target-word pronunciation errors on unseen entries and check that ordinary words remain correct.',
+    ]],
+    ['pace', [
+      'Collect aligned examples across utterance lengths, speaking rates, and clause structures. Label pauses and dense sequences such as numbers or instructions.',
+      'Train or fine-tune duration and pause prediction with better coverage of the weak cases. Keep the text front end fixed for the comparison.',
+      'Compare pause placement, duration, and listener comprehension on unseen short and long prompts.',
+    ]],
+    ['expressiveness', [
+      'Collect consented target-locale speech with labels for intent, emphasis, and intensity. Include neutral and expressive readings of matched text where possible.',
+      'Test style-conditioned fine-tuning with balanced intent coverage and a mix of neutral examples to preserve intelligibility and voice identity.',
+      'Run a blind A/B on unseen scripts with native listeners. Score intent recognition and appropriate emphasis; also check clarity and speaker similarity.',
+    ]],
+    ['contextFit', [
+      'Build a locale-specific dataset tagged by domain and intent. For customer service, separate greetings, instructions, reassurance, and escalation.',
+      'Compare domain/intent conditioning or a domain-balanced fine-tune against the same base model. Retain general-domain examples to limit regressions.',
+      'Use held-out scenarios and native listeners to rate appropriateness by intent. Include out-of-domain prompts to check for regressions.',
+    ]],
+    ['accentFit', [
+      'Collect consented native target-locale speech across speakers and speaking styles. Verify locale labels and cover vowel, stress, or lexical-tone contrasts as applicable.',
+      'Audit sampling by locale. Test locale conditioning or rebalance the target-locale data while holding speaker conditioning fixed.',
+      'Use native listeners and unseen contrast prompts to test locale fit, pronunciation, and preservation of voice identity.',
+    ]],
+    ['audioQuality', [
+      'Audit training audio for clipping, compression, noise, inconsistent sample rates, and transcript or segmentation errors. Keep a clean validation split.',
+      'Compare raw synthesis with delivery output first. If artifacts are already present in raw audio, test a checkpoint trained on cleaned data or, if applicable, fine-tune the vocoder separately.',
+      'Use matched-loudness A/B listening and track artifact rates and intelligibility on held-out prompts.',
+    ]],
   ]);
   const fields = [['voice', 'Voice'], ['domain', 'Domain'], ['locale', 'Language / accent'], ['model', 'Voice model'], ['gender', 'Gender']];
   const allLabels = { domain: 'All domains', locale: 'All languages / accents', model: 'All models', gender: 'All genders', voice: 'All voices' };
@@ -1227,11 +1256,15 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
       issue.append(el('strong', ratingLabel(item)));
       if (!note) {
         issue.append(el('p', issueDescriptions.get(item.id)));
-        const action = issueActions.get(item.id);
-        if (action) {
-          const next = el('p', null, { class: 'issue-action' });
-          next.append(el('strong', 'Try: '), action);
-          issue.append(next);
+        const experiment = issueExperiments.get(item.id);
+        if (experiment) {
+          const guidance = el('div', null, { class: 'issue-guidance' });
+          for (const [index, step] of ['Data to collect', 'Model experiment', 'How to validate'].entries()) {
+            const row = el('p');
+            row.append(el('strong', `${step}: `), experiment[index]);
+            guidance.append(row);
+          }
+          issue.append(guidance);
         }
       }
       ratings.append(issue);
@@ -1485,7 +1518,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   byId('close-detail').addEventListener('click', () => byId('detail').close());
   byId('snapshot').textContent = `Exported ${data.exportedOn} (UTC)`;
   byId('mixed').hidden = !data.mixedSettings;
-  byId('issues-note').textContent = `Open a voice and script locale to see what to review. Domain means weight each visible locale equally. Dimensions below ${data.issueThreshold}/5 are listed lowest first. Suggested checks are starting points, not confirmed causes or clip-level findings.`;
+  byId('issues-note').textContent = `Open a voice and script locale to review dimensions below ${data.issueThreshold}/5, lowest first. Domain means weight each visible locale equally. The guidance proposes data collection, model experiments, and validation for TTS teams with training access. These are experiments to prioritize, not confirmed causes or clip-level findings.`;
   render();
 </script>
 </body>
