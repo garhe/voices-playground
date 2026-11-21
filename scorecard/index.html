@@ -12,6 +12,8 @@
 .arena-card>h2,.arena-card>h3,.arena-card>p{margin:0}
 .arena-card>summary{cursor:pointer}
 .arena-card>button{justify-self:start}
+.arena-matrix-heading,.arena-matrix-actions{display:flex;flex-wrap:wrap;gap:8px}
+.arena-matrix-actions>a.secondary{text-decoration:none}
 .arena-matrix{--table-row-label-min:clamp(7rem, 24vw, 280px)}
 .arena-dimension-comparison{--table-row-label-min:7rem}
 .arena-dimension-comparison tbody td{font-variant-numeric:tabular-nums}
@@ -996,7 +998,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   }
 }
 
-:root{--theme-color:#91ad59;--theme-accent:rgb(100, 119, 62);--theme-accent-hover:rgb(68, 81, 42);--theme-row-hover:rgb(205, 211, 193);--theme-heading:rgb(55, 65, 34);--theme-text:rgb(50, 60, 31);--theme-muted:rgb(58, 69, 36);--theme-page:rgb(239, 244, 227);--theme-glow:rgb(167, 189, 122);--theme-glow-soft:rgb(244, 225, 156);--theme-glow-third:rgb(241, 202, 199);--theme-card-wash:linear-gradient(125deg, rgb(220, 229, 202), rgb(252, 246, 226));--theme-panel-wash:linear-gradient(135deg, rgb(250, 240, 206), rgb(251, 240, 239));--theme-recordings-wash:linear-gradient(125deg, rgb(249, 230, 228), rgb(244, 247, 235));--theme-sidebar-wash:radial-gradient(ellipse 113% 32% at 86% 12%, rgb(91, 89, 80) 0%, transparent 100%), radial-gradient(ellipse 105% 37% at 89% 32%, rgb(78, 93, 49) 0%, transparent 100%), radial-gradient(ellipse 121% 25% at 62% 55%, rgb(96, 86, 49) 0%, transparent 100%), radial-gradient(ellipse 156% 41% at 77% 68%, rgb(84, 91, 67) 0%, transparent 100%), radial-gradient(ellipse 126% 35% at 69% 94%, rgb(106, 83, 81) 0%, transparent 100%), linear-gradient(#4e5d31, #4e5d31);--theme-sidebar-selected:radial-gradient(ellipse 65% 146% at 7% 92%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 52% 111% at 37% 22%, rgb(211, 222, 189) 0%, transparent 100%), radial-gradient(ellipse 70% 151% at 55% 82%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 46% 117% at 75% 54%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 67% 150% at 83% 11%, rgb(249, 239, 203) 0%, transparent 100%), #f5f7f8;--theme-sidebar-hover:radial-gradient(ellipse 71% 90% at 14% 64%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 55% 86% at 25% 85%, rgb(216, 226, 197) 0%, transparent 100%), radial-gradient(ellipse 45% 102% at 46% 31%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 69% 102% at 65% 28%, rgb(249, 239, 203) 0%, transparent 100%), radial-gradient(ellipse 51% 101% at 91% 59%, rgb(233, 240, 215) 0%, transparent 100%), #f5f7f8;--theme-sidebar-ink:rgb(39, 47, 25);--theme-sidebar-marker:rgb(246, 238, 213);--theme-workspace-hover:radial-gradient(ellipse 71% 110% at 4% 20%, rgb(117, 114, 102) 0%, transparent 100%), radial-gradient(ellipse 63% 112% at 31% 11%, rgb(107, 117, 85) 0%, transparent 100%), radial-gradient(ellipse 61% 152% at 47% 58%, rgb(100, 119, 62) 0%, transparent 100%), radial-gradient(ellipse 45% 139% at 63% 86%, rgb(136, 106, 104) 0%, transparent 100%), radial-gradient(ellipse 52% 130% at 91% 68%, rgb(130, 117, 67) 0%, transparent 100%), #64773e;--theme-surface-rgb:249, 251, 245;--theme-glass-rgb:206, 218, 200;--theme-panel-rgb:249, 239, 203;--theme-sidebar-rgb:78, 93, 49;--theme-inset-rgb:254, 253, 250;--theme-selected:rgb(250, 235, 234);--theme-header:rgb(252, 247, 229);--theme-border:rgba(100, 119, 62, .25);--theme-scrollbar:rgb(170, 180, 149)}</style>
+:root{--theme-color:#91ad59;--theme-accent:rgb(100, 119, 62);--theme-accent-hover:rgb(68, 81, 42);--theme-row-hover:rgb(205, 211, 193);--theme-heading:rgb(55, 65, 34);--theme-text:rgb(50, 60, 31);--theme-muted:rgb(58, 69, 36);--theme-page:rgb(239, 244, 227);--theme-glow:rgb(167, 189, 122);--theme-glow-soft:rgb(244, 225, 156);--theme-glow-third:rgb(241, 202, 199);--theme-card-wash:linear-gradient(125deg, rgb(220, 229, 202), rgb(252, 246, 226));--theme-panel-wash:linear-gradient(135deg, rgb(250, 240, 206), rgb(251, 240, 239));--theme-recordings-wash:linear-gradient(125deg, rgb(249, 230, 228), rgb(244, 247, 235));--theme-sidebar-wash:radial-gradient(ellipse 116% 42% at 33% 8%, rgb(106, 83, 81) 0%, transparent 100%), radial-gradient(ellipse 117% 44% at 76% 37%, rgb(78, 93, 49) 0%, transparent 100%), radial-gradient(ellipse 157% 31% at 8% 45%, rgb(91, 89, 80) 0%, transparent 100%), radial-gradient(ellipse 100% 45% at 95% 67%, rgb(84, 91, 67) 0%, transparent 100%), radial-gradient(ellipse 151% 33% at 50% 95%, rgb(96, 86, 49) 0%, transparent 100%), linear-gradient(#4e5d31, #4e5d31);--theme-sidebar-selected:radial-gradient(ellipse 68% 117% at 15% 32%, rgb(249, 239, 203) 0%, transparent 100%), radial-gradient(ellipse 42% 128% at 27% 68%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 43% 84% at 49% 76%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 51% 105% at 67% 54%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 66% 133% at 90% 12%, rgb(211, 222, 189) 0%, transparent 100%), #f5f7f8;--theme-sidebar-hover:radial-gradient(ellipse 61% 84% at 14% 69%, rgb(251, 248, 238) 0%, transparent 100%), radial-gradient(ellipse 41% 95% at 28% 60%, rgb(233, 240, 215) 0%, transparent 100%), radial-gradient(ellipse 40% 129% at 55% 19%, rgb(248, 227, 225) 0%, transparent 100%), radial-gradient(ellipse 43% 99% at 74% 94%, rgb(216, 226, 197) 0%, transparent 100%), radial-gradient(ellipse 68% 149% at 97% 24%, rgb(249, 239, 203) 0%, transparent 100%), #f5f7f8;--theme-sidebar-ink:rgb(39, 47, 25);--theme-sidebar-marker:rgb(246, 238, 213);--theme-workspace-hover:radial-gradient(ellipse 68% 143% at 17% 38%, rgb(130, 117, 67) 0%, transparent 100%), radial-gradient(ellipse 60% 147% at 34% 86%, rgb(107, 117, 85) 0%, transparent 100%), radial-gradient(ellipse 64% 126% at 55% 37%, rgb(136, 106, 104) 0%, transparent 100%), radial-gradient(ellipse 54% 97% at 74% 30%, rgb(100, 119, 62) 0%, transparent 100%), radial-gradient(ellipse 47% 132% at 93% 49%, rgb(117, 114, 102) 0%, transparent 100%), #64773e;--theme-surface-rgb:249, 251, 245;--theme-glass-rgb:206, 218, 200;--theme-panel-rgb:249, 239, 203;--theme-sidebar-rgb:78, 93, 49;--theme-inset-rgb:254, 253, 250;--theme-selected:rgb(250, 235, 234);--theme-header:rgb(252, 247, 229);--theme-border:rgba(100, 119, 62, .25);--theme-scrollbar:rgb(170, 180, 149)}</style>
   <style>
     .shared-scorecard .nav { text-decoration: none; }
     .shared-scorecard .sidebar-foot { margin-top: auto; }
@@ -1017,7 +1019,14 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     .shared-scorecard .issues-locale { padding: .75rem; border: 1px solid var(--mica-border); border-radius: 8px; background: var(--mica-inset); }
     .issues-locale > summary { cursor: pointer; font-weight: 650; }
     .issues-locale + .issues-locale { margin-top: .65rem; }
-    .shared-scorecard .issues-locale .table-scroll { margin-top: .65rem; }
+    .issues-domain { min-width: 0; margin-top: .85rem; }
+    .issues-domain > h3 { margin: 0; overflow-wrap: anywhere; }
+    .issues-domain > p { margin: .15rem 0 0; }
+    .issues-voices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: .65rem; margin-top: .65rem; }
+    .issues-voice { min-width: 0; padding: .75rem; border: 1px solid var(--mica-border); border-radius: 8px; overflow-wrap: anywhere; }
+    .issues-voice h4, .issues-voice p { margin: 0; }
+    .issues-voice ol { margin: .5rem 0 0; padding-inline-start: 1.5rem; }
+    .issues-voice li + li { margin-top: .4rem; }
     #detail { width: min(36rem, 94vw); max-height: 90vh; }
     #detail-title { overflow-wrap: anywhere; }
     #detail dt { font-weight: 650; }
@@ -1040,9 +1049,9 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     <nav class="workspace-nav" aria-label="Scorecard sections">
       <p class="nav-label">VOICE ARENA</p>
       <div class="scoring-nav">
-        <a class="nav active" href="#matrix" aria-current="location"><span aria-hidden="true">01</span> Scorecard</a>
-        <a class="nav" href="#breakdown"><span aria-hidden="true">02</span> Detailed breakdown</a>
-        <a class="nav" href="#issues"><span aria-hidden="true">03</span> Top TTS issues</a>
+        <a class="nav active" href="#issues" aria-current="location"><span aria-hidden="true">01</span> Locale summary</a>
+        <a class="nav" href="#matrix"><span aria-hidden="true">02</span> Scorecard matrix</a>
+        <a class="nav" href="#breakdown"><span aria-hidden="true">03</span> Detailed breakdown</a>
       </div>
     </nav>
     <div class="sidebar-foot">Read-only snapshot</div>
@@ -1060,6 +1069,11 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     <div class="section-with-action"><span id="matches" class="hint" role="status"></span><button id="reset" class="text-button" type="button">Reset filters</button></div>
     <noscript>This scorecard needs JavaScript to display its tables and filters.</noscript>
   </section>
+  <section id="issues" class="card arena-card" aria-labelledby="issues-heading">
+    <h2 id="issues-heading">Voice scores and top TTS issues by locale</h2>
+    <p id="issues-note" class="muted"></p>
+    <div id="issue-groups"></div>
+  </section>
   <section id="matrix" aria-labelledby="matrix-heading">
     <h2 id="matrix-heading">Domain matrices</h2>
     <p class="muted">Overall preference from the newest fully assessed result per voice, model, locale, and domain. Select a score for details.</p>
@@ -1069,11 +1083,6 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     <h2 id="breakdown-heading">Detailed breakdown</h2>
     <p class="muted">Aggregate scores for each tested combination. A dash means a score is unavailable.</p>
     <div id="comparison"></div>
-  </section>
-  <section id="issues" class="card arena-card" aria-labelledby="issues-heading">
-    <h2 id="issues-heading">Top TTS issues by voice</h2>
-    <p id="issues-note" class="muted"></p>
-    <div id="issue-groups"></div>
   </section>
   <dialog id="detail" class="confirmation-dialog" aria-labelledby="detail-title">
     <div class="section-with-action"><h2 id="detail-title">Score details</h2><button id="close-detail" class="secondary" type="button" autofocus>Close</button></div>
@@ -1087,6 +1096,15 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   const byId = id => document.getElementById(id);
   const data = JSON.parse(byId('scorecard-data').textContent);
   const labels = new Map(data.dimensions.map(({ id, label }) => [id, label]));
+  const issueDescriptions = new Map([
+    ['naturalness', 'Speech may sound less natural or more synthetic.'],
+    ['articulation', 'Some sounds or words may be pronounced unclearly or inaccurately.'],
+    ['pace', 'Pacing may feel rushed, slow, or uneven.'],
+    ['expressiveness', 'The tone may sound flat or lack emotional variation.'],
+    ['contextFit', 'The delivery may not match the tone expected for this domain.'],
+    ['accentFit', 'The accent may not closely match the target locale.'],
+    ['audioQuality', 'The audio may sound less clear or clean.'],
+  ]);
   const fields = [['domain', 'Domain'], ['locale', 'Language / accent'], ['model', 'Voice model'], ['gender', 'Gender'], ['voice', 'Voice']];
   const allLabels = { domain: 'All domains', locale: 'All languages / accents', model: 'All models', gender: 'All genders', voice: 'All voices' };
   const order = (a, b) => a.localeCompare(b, undefined, { numeric: true });
@@ -1149,32 +1167,45 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     return cell.ratings.find(item => item.id === id)?.score;
   }
 
-  function issueSummary(cell) {
-    if (cell.issues.length) return cell.issues.map(id => labels.get(id)).join(' · ');
-    return cell.ratings.some(item => item.score != null)
-      ? `No assessed dimension below ${data.issueThreshold}/5` : 'Insufficient scored evidence';
+  function issueRatings(cell) {
+    const scored = cell.ratings.filter(item => Number.isFinite(item.score)).sort((a, b) => a.score - b.score);
+    if (!scored.length) return { items: [], note: 'No dimension scores available.' };
+    const flagged = scored.filter(item => item.score < data.issueThreshold);
+    return flagged.length ? { items: flagged } : {
+      items: scored.filter(item => item.score === scored[0].score),
+      note: `No assessed dimension below ${data.issueThreshold}/5. Lowest rated:`,
+    };
+  }
+
+  function ratingLabel(item) {
+    return `${labels.get(item.id)} · ${format(item.score)}/5`;
   }
 
   function inspect(cell) {
     byId('detail-title').textContent = cell.voice;
     const list = el('dl');
+    const issues = issueRatings(cell);
     for (const [label, value] of [['Model', cell.model], ['Domain', cell.domain], ['Script locale', cell.locale],
       ['Gender', cell.gender], ['Evaluated files', cell.files], ['Overall preference', `${format(cell.score)} / 5`],
       ...cell.ratings.map(item => [labels.get(item.id), item.score == null ? 'Not assessed' : `${format(item.score)} / 5`]),
-      ['Top TTS issues', issueSummary(cell)]]) list.append(el('dt', label), el('dd', value));
+      ['Top TTS issues', [issues.note, ...issues.items.map(ratingLabel)].filter(Boolean).join(' ')]]) list.append(el('dt', label), el('dd', value));
     if (!cell.ratings.length) list.append(el('dt', 'Rubric scores'), el('dd', 'Not available'));
     byId('detail-content').replaceChildren(list);
     byId('detail').showModal();
   }
 
-  function scoreCell(cell) {
-    if (!cell) return '—';
+  function scoreButton(cell) {
     const value = format(cell.score);
-    const td = el('td');
     const button = el('button', value, { class: 'arena-score', type: 'button',
       'aria-label': `${cell.voice}, ${cell.model}, ${cell.domain}, ${cell.locale}: ${value} out of 5. View details` });
     button.addEventListener('click', () => inspect(cell));
-    td.append(button);
+    return button;
+  }
+
+  function scoreCell(cell) {
+    if (!cell) return '—';
+    const td = el('td');
+    td.append(scoreButton(cell));
     return td;
   }
 
@@ -1220,17 +1251,48 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   }
 
   function renderIssues(rows) {
+    const open = new Map([...byId('issue-groups').querySelectorAll('details')].map(group => [group.dataset.locale, group.open]));
     const groups = unique(rows.map(cell => cell.locale)).map(locale => {
-      const group = el('details', null, { class: 'issues-locale' });
-      const combinations = rows.filter(cell => cell.locale === locale).sort((a, b) =>
-        order(a.voice, b.voice) || order(a.model, b.model) || order(a.domain, b.domain));
-      group.open = true;
-      group.append(el('summary', `${locale} (${combinations.length})`), grid(`${locale}: TTS issue categories`,
-        ['Voice', 'Model', 'Domain', 'Low-scoring areas'], combinations.map(cell =>
-          [el('th', cell.voice, { scope: 'row' }), cell.model, cell.domain, issueSummary(cell)])));
+      const group = el('details', null, { class: 'issues-locale', 'data-locale': locale });
+      const combinations = rows.filter(cell => cell.locale === locale);
+      const domains = unique(combinations.map(cell => cell.domain));
+      group.open = open.get(locale) ?? false;
+      group.append(el('summary', `${locale} · ${domains.length} ${domains.length === 1 ? 'domain' : 'domains'} · ${combinations.length} tested combinations`));
+      for (const domain of domains) {
+        const block = el('section', null, { class: 'issues-domain' });
+        const cells = combinations.filter(cell => cell.domain === domain).sort((a, b) =>
+          b.score - a.score || order(a.voice, b.voice) || order(a.model, b.model));
+        const average = cells.reduce((sum, cell) => sum + cell.score, 0) / cells.length;
+        const voices = el('div', null, { class: 'issues-voices' });
+        for (const cell of cells) {
+          const voice = el('article', null, { class: 'issues-voice' });
+          const score = el('p', 'Domain score: ');
+          score.append(scoreButton(cell), ' / 5');
+          voice.append(el('h4', cell.voice), score);
+          if (!cell.voice.endsWith(`:${cell.model}`)) voice.append(el('p', cell.model, { class: 'hint' }));
+          const { items, note } = issueRatings(cell);
+          if (note) voice.append(el('p', note, { class: 'hint' }));
+          if (items.length) {
+            const list = el('ol');
+            for (const item of items) {
+              const issue = el('li');
+              issue.append(el('strong', ratingLabel(item)));
+              if (!note) issue.append(el('p', issueDescriptions.get(item.id)));
+              list.append(issue);
+            }
+            voice.append(list);
+          }
+          voices.append(voice);
+        }
+        block.append(el('h3', domain),
+          el('p', `Domain average: ${format(average)} / 5 · ${cells.length} voice/model ${cells.length === 1 ? 'result' : 'results'}`, { class: 'hint' }), voices);
+        group.append(block);
+      }
       return group;
     });
-    byId('issue-groups').replaceChildren(...(groups.length ? groups : [el('p', 'No issue summaries match these filters.')]));
+    if (groups.length && !groups.some(group => group.open)
+      && ([...open.values()].some(Boolean) || !groups.some(group => open.has(group.dataset.locale)))) groups[0].open = true;
+    byId('issue-groups').replaceChildren(...(groups.length ? groups : [el('p', 'No locale summaries match these filters.')]));
   }
 
   function render() {
@@ -1301,7 +1363,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   });
   byId('close-detail').addEventListener('click', () => byId('detail').close());
   function updateNavigation() {
-    const current = location.hash || '#matrix';
+    const current = location.hash || '#issues';
     for (const link of document.querySelectorAll('.workspace-nav a')) {
       const active = link.getAttribute('href') === current;
       link.classList.toggle('active', active);
@@ -1313,7 +1375,7 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
   updateNavigation();
   byId('snapshot').textContent = `Exported ${data.exportedOn} (UTC)`;
   byId('mixed').hidden = !data.mixedSettings;
-  byId('issues-note').textContent = `Broad issue categories only. An assessed category is flagged when its aggregate score is below ${data.issueThreshold}/5.`;
+  byId('issues-note').textContent = `Domain averages give each visible voice/model result equal weight. Select a score for details. Rubric scores below ${data.issueThreshold}/5 are shown lowest first, with plain-language descriptions of what they may indicate. The cutoff is for review, not pass/fail. No clip-level evidence is shown.`;
   render();
 </script>
 </body>
