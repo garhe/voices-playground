@@ -28,8 +28,9 @@
 .azure-settings-page .card h2{scroll-margin-top:12px}
 .judge-summary{padding-inline-start:22px;overflow-wrap:anywhere}
 @media(max-width:760px){.scoring-nav{padding-inline-start:4px}}
-.script-locale-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:7px;max-height:160px;overflow:auto;padding:8px;border:1px solid var(--mica-border);border-radius:8px}
-.script-locale-options label{display:flex;flex-direction:row;align-items:center;gap:8px;margin:0}
+.script-locale-options{height:160px;min-height:80px;resize:vertical;overflow:auto;padding:8px;border:1px solid var(--mica-border);border-radius:8px}
+.script-locale-columns{columns:220px;column-gap:7px}
+.script-locale-columns label{display:flex;flex-direction:row;align-items:center;gap:8px;margin:0 0 7px;break-inside:avoid}
 .script-locale-options input{width:auto;margin:0}
 .script-preview{padding:10px 12px;border:1px solid var(--mica-border);border-radius:8px;overflow-wrap:anywhere}
 .script-brief-suggestion{display:grid;gap:12px}
@@ -397,7 +398,7 @@ main { max-width: none; padding-bottom: 8px; }
 }
 .filter-bar > label, .filter-bar > .date-field, .filter-bar > .multi-filter { min-width: 0; gap: 4px; }
 .filter-bar label { line-height: 1.4; }
-.filter-bar input:not([type=checkbox]), .filter-bar select { height: 36px; min-height: 36px; padding: 6px 9px; }
+.filter-bar input:not([type=checkbox]), .filter-bar select, .script-template-save input { height: 36px; min-height: 36px; padding: 6px 9px; }
 .multi-filter { display: grid; line-height: 1.4; }
 .multi-filter > span { font-size: var(--text-small, .8125rem); font-weight: 600; }
 .filter-bar .multi-filter-trigger { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 36px; min-height: 36px; padding: 6px 9px; }
@@ -415,6 +416,16 @@ main { max-width: none; padding-bottom: 8px; }
   container-type: inline-size;
   --scrollbar-thumb: #ffffff66;
   --scrollbar-hover: #ffffff99;
+.filter-bar.script-brief-controls { display: flex; flex-wrap: wrap; align-items: flex-start; }
+.script-brief-controls > * { flex: 0 1 min(100%, 9rem); min-width: 0; }
+.script-brief-controls > :first-child, .script-brief-controls > .script-brief-style { flex-basis: min(100%, 15rem); }
+.script-brief-style label { gap: 4px; }
+.script-brief-controls select { width: 100%; text-overflow: ellipsis; }
+.script-template-save-group { display: grid; gap: 4px; min-width: 0; }
+.button-row.script-template-save { align-items: flex-end; }
+.script-template-save > label { flex: 0 1 12rem; min-width: 0; gap: 4px; line-height: 1.4; }
+.script-template-save > .secondary { height: 36px; min-height: 36px; padding: 6px 12px; white-space: nowrap; }
+.script-template-save > .secondary:disabled:hover { background: var(--mica-control); }
   background: linear-gradient(160deg, #ffffff0d, transparent 65%), var(--theme-sidebar-wash), var(--mica-sidebar);
   border-right: 1px solid #ffffff33;
   box-shadow: inset -1px 0 0 #ffffff0d, 4px 0 24px #173c3214;

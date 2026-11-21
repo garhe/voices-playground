@@ -163,6 +163,22 @@ function hasRequestedSentenceTags(text: string, allowedNames: Set<string>): bool
   });
 }
 
+const QUESTION_MARK = /[?？؟]/u;
+const TRAILING_AFTER_QUESTION = /^(?:\s|[.…"'”’»)）」』]|\[[\p{L}\p{N}_-]+\])*$/u;
+
+/** A question must close its utterance so the listener can answer before the speaker continues. */
+export function continuesAfterQuestion(text: string): boolean {
+  const lastQuestion = Math.max(...[...text.matchAll(new RegExp(QUESTION_MARK, 'gu'))].map(match => match.index ?? -1), -1);
+  return lastQuestion >= 0 && !TRAILING_AFTER_QUESTION.test(text.slice(lastQuestion + 1));
+}
+
+/** Airport codes that appear in parentheses somewhere in the script must never also appear bare. */
+export function bareAirportCodes(texts: string[]): string[] {
+  const codes = new Set(texts.flatMap(text => [...text.matchAll(/[(（]([A-Z]{3})[)）]/gu)].map(match => match[1])));
+  return [...codes].filter(code => texts.some(text =>
+    new RegExp(`(?<![(（A-Za-z])${code}(?![)）A-Za-z])`, 'u').test(text)));
+}
+
 async function generateLocale(
   fetchText: typeof fetch, credentials: ScriptTextConnection, request: ScriptGenerationRequest,
   locale: { value: string; label: string }, signal: AbortSignal,
@@ -176,6 +192,8 @@ async function generateLocale(
     'Follow the supplied locale, style, speaker count, and utterance count. Localize spelling, vocabulary and expressions naturally.',
     'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
     'Use fictional examples and no real personal or sensitive details.',
+    'If an utterance asks a question, the question must be its final sentence: never ask and then keep speaking in the same utterance, because the listener must answer first. Continue in the next utterance.',
+    'Whenever you mention an airport code, write it as an uppercase 3-letter code in parentheses right after the city or airport name, for example Da Nang (DAD) to Incheon (ICN); never write a bare code.',
   ].join(' '), {
     locale: locale.label,
     style: request.style,
@@ -189,6 +207,11 @@ async function generateLocale(
     throw new RetryableScriptError('The model returned an invalid script structure, utterance count, or speaker count. Try again.');
   if (requiredTags && script.data.utterances.some(({ text }) => !hasRequestedSentenceTags(text, requiredTags)))
     throw new RetryableScriptError('The model omitted or returned invalid requested sentence tags. Try again.');
+  if (script.data.utterances.some(({ text }) => continuesAfterQuestion(text)))
+    throw new RetryableScriptError('The model kept speaking after asking a question in the same utterance. Try again.');
+  const bareCodes = bareAirportCodes(script.data.utterances.map(({ text }) => text));
+  if (bareCodes.length)
+    throw new RetryableScriptError(`The model wrote airport code ${bareCodes.join(', ')} without parentheses. Try again.`);
   const calmLimit = request.prompt.match(/\buse \[calm\] at most (\d+) times per locale\b/i);
   if (calmLimit) {
     const calmCount = script.data.utterances.reduce((count, { text }) => count + (text.match(/\[calm\]/gi)?.length ?? 0), 0);

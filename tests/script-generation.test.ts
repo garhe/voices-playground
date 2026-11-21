@@ -8,10 +8,12 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/app.js';
+import { bareAirportCodes, continuesAfterQuestion } from '../server/scriptGeneration.js';
 import { parseStudioScript } from '../server/studioScripts.js';
 import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptGenerationResult } from '../shared/scriptGeneration.js';
-import { generateScriptPreview, generateScriptsWithRetry } from '../src/scriptGenerationProgress.js';
-import { DEFAULT_SCRIPT_BRIEF, DEFAULT_SCRIPT_LOCALES, extractScriptStyle, ScriptGeneration } from '../src/ScriptGeneration.js';
+import { generateScriptPreview, generateScriptsWithRetry, regenerateLocalePreview } from '../src/scriptGenerationProgress.js';
+import { loadBriefTemplates, saveBriefTemplate } from '../src/scriptBriefTemplates.js';
+import { BUILT_IN_BRIEF_TEMPLATES, DEFAULT_SCRIPT_BRIEF, DEFAULT_SCRIPT_LOCALES, extractScriptStyle, ScriptGeneration } from '../src/ScriptGeneration.js';
 
 const brief = {
   locales: ['fr-ca'], style: '  Friendly support call with dry humor  ', speakers: 2, utteranceCount: 2,
@@ -24,26 +26,75 @@ test('default content brief fits the form and requires expression tags and hesit
   }));
   const prompt = html.match(/Content brief<textarea[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
   assert.ok(prompt);
+  assert.match(html, /<\/textarea><\/label><div class="button-row"><button[^>]*>Improve with AI<\/button>.*New template name/);
+  assert.match(prompt, /or `à\.\.\.` in Vietnamese\./);
   assert.match(prompt, /at least 2 hesitations per mini-call\*\* \(at least 8 total\)/);
   assert.match(prompt, /place at least half \*\*in the middle of a sentence\*\*/);
   assert.match(prompt, /Prefix every spoken sentence with exactly 1 emotion\/style tag in square brackets/);
   assert.match(prompt, /Use only these style names: amazed, amused/);
   assert.match(prompt, /Use \[calm\] at most 4 times per locale/);
-  assert.match(prompt, /Use at most 1 brief greeting across all calls/);
-  assert.match(prompt, /prioritize problem solving over greetings and pleasantries/);
+  assert.match(prompt, /Use at most 1 brief greeting across the calls; focus on solving the problem/);
   const delivery = prompt.match(/\*\*Colloquial Delivery:\*\*([^\r\n]*)/)?.[1];
   assert.ok(delivery);
   assert.match(delivery, /In every locale, use what a local agent would actually say on the phone/);
   assert.match(delivery, /Mix in English words or acronyms where locals naturally do/);
   assert.match(delivery, /Prefer local equivalents when they sound more natural\. No term is mandatory\./);
   assert.doesNotMatch(delivery, /zh-HK|literal word/);
-  assert.match(prompt, /00013–00016 \(Call 4 — Flight &amp; Hotel Travel\)[^\r\n]*both endpoints with the localized city or airport name first, then its uppercase 3-letter code: Da Nang DAD to Incheon ICN\. Never say a bare code\./);
+  assert.match(prompt, /00013–00016 \(Call 4 — Flight &amp; Hotel Travel\)[^\r\n]*both endpoints as the localized city name, then its uppercase 3-letter code in parentheses: Da Nang \(DAD\) to Incheon \(ICN\)\. Never say a bare code\./);
+  assert.match(prompt, /End any utterance at the question\./);
+  assert.match(prompt, /without asterisks; parentheses only for airport codes\./);
   assert.match(html, /Script style<input[^>]*value="Customer_Services_Tag"/);
+  assert.match(html, /<option value="customer_services_tag" selected="">customer_services_tag<\/option>/);
+  assert.match(html, /<option value="customer_services">customer_services<\/option>/);
   assert.match(prompt, /\[laughter\].*\[coughing\].*\[throat_clearing\].*\[breathing\].*\[sighing\].*\[yawning\]/);
   assert.doesNotMatch(prompt, /Do NOT use any square brackets/);
   assert.doesNotMatch(prompt, /4 to 6 total/);
   assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt }).success, true);
   assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt: DEFAULT_SCRIPT_BRIEF }).success, true);
+});
+
+test('both built-in briefs request distinct cases within the same four domains', () => {
+  for (const { prompt } of BUILT_IN_BRIEF_TEMPLATES) {
+    assert.match(prompt, /Call 1 — Telecom[\s\S]*Call 2 — Banking & Finance[\s\S]*Call 3 — Delivery & Logistics[\s\S]*Call 4 — Flight & Hotel Travel/);
+    assert.match(prompt, /For each locale and run, vary the incident, cause, and resolution within each domain/);
+    assert.match(prompt, /Vary case-specific nouns \(devices, merchants, parcels, routes\)/);
+    assert.match(prompt, /Don't translate or recycle a script by just swapping names/);
+  }
+});
+
+test('plain customer service uses the same scenario rules and explicitly excludes annotations', () => {
+  const [tagged, plain] = BUILT_IN_BRIEF_TEMPLATES;
+  const sharedRules = (prompt: string) => [
+    prompt.split('### Task\n')[1].split('### Output Rules')[0],
+    prompt.split('2. **Spoken hesitations:**')[1],
+  ];
+  assert.deepEqual(sharedRules(plain.prompt), sharedRules(tagged.prompt));
+  assert.match(plain.prompt, /or `à\.\.\.` in Vietnamese\./);
+  assert.equal(extractScriptStyle(plain.prompt), 'Customer_Services');
+  assert.match(plain.prompt, /no IDs.*stage directions, or emotion, style, or sound tags/);
+  assert.doesNotMatch(plain.prompt, /\[[^\]]+\]/);
+  assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt: plain.prompt }).success, true);
+});
+
+test('named brief copies persist exactly and cannot overwrite built-ins or saved templates', () => {
+  const entries = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => { entries.set(key, value); },
+  };
+  assert.deepEqual(loadBriefTemplates(storage), []);
+  const draft = { name: '  Weekend support  ', prompt: 'Script style: Quick support\n\nCustom wording.\n' };
+  const saved = { ...draft, name: 'Weekend support' };
+  assert.deepEqual(saveBriefTemplate(storage, draft, BUILT_IN_BRIEF_TEMPLATES), { template: saved, templates: [saved] });
+  assert.deepEqual(loadBriefTemplates(storage), [saved]);
+  for (const name of ['WEEKEND SUPPORT', 'customer_services', 'Customer_Services_Tag']) {
+    assert.throws(() => saveBriefTemplate(storage, { ...draft, name }, BUILT_IN_BRIEF_TEMPLATES), /already exists/);
+  }
+  assert.throws(() => saveBriefTemplate(storage, { ...draft, prompt: ' ' }, BUILT_IN_BRIEF_TEMPLATES), /Enter a content brief/);
+  assert.deepEqual(loadBriefTemplates(storage), [saved]);
+  assert.throws(() => saveBriefTemplate({ ...storage, setItem: () => { throw new Error('Storage full'); } },
+    { ...draft, name: 'Another template' }, BUILT_IN_BRIEF_TEMPLATES), /Could not save/);
+  assert.throws(() => saveBriefTemplate({ ...storage, getItem: () => '{' }, draft, BUILT_IN_BRIEF_TEMPLATES), /No templates were overwritten/);
 });
 
 test('script style follows an explicit brief label or the opening description', () => {
@@ -55,6 +106,17 @@ test('script style follows an explicit brief label or the opening description', 
   assert.equal(extractScriptStyle(`Style: ${'a'.repeat(MAX_SCRIPT_STYLE_LENGTH - 1)}𐐀`), 'a'.repeat(MAX_SCRIPT_STYLE_LENGTH - 1));
 });
 
+test('script generation retries when a question does not end its utterance or an airport code is bare', () => {
+  assert.equal(continuesAfterQuestion('[curious] Want me to move you to that flight?'), false);
+  assert.equal(continuesAfterQuestion('[curious] Is it the $68.42 charge? [laughter]'), false);
+  assert.equal(continuesAfterQuestion('[curious] 要我帮您改到这班吗？'), false);
+  assert.equal(continuesAfterQuestion('[confident] The card is locked.'), false);
+  assert.equal(continuesAfterQuestion('[curious] Want me to move you? [confident] Done, you are confirmed.'), true);
+  assert.equal(continuesAfterQuestion('[concerned] It still fails, right? [calm] Let us check settings.'), true);
+  assert.deepEqual(bareAirportCodes(['From Da Nang (DAD) to Incheon (ICN).', 'Your seat to Incheon (ICN) is set.']), []);
+  assert.deepEqual(bareAirportCodes(['From Da Nang (DAD) to Incheon (ICN).', 'The flight from Da Nang DAD is ready.']), ['DAD']);
+});
+
 test('script filenames use the locale and style, replace spaces, and stay compatible with Studio', () => {
   assert.equal(scriptFileName('en-US', '  Warm  documentary narration  '), 'en-US_Warm_documentary_narration.txt');
   assert.equal(scriptFileName('fr-CA', '../Service à la clientèle: appel/rappel?'), 'fr-CA_Service_à_la_clientèle_appel_rappel.txt');
@@ -62,6 +124,35 @@ test('script filenames use the locale and style, replace spaces, and stay compat
   const longName = scriptFileName('fr-CA', `${'a'.repeat(73)}𐐀`);
   assert.equal(longName, `fr-CA_${'a'.repeat(73)}.txt`);
   assert.doesNotThrow(() => parseStudioScript(longName, 'fr-CA_00001\tBonjour.\r\n'));
+});
+
+test('regeneration submits only the target locale with the original settings and preserves other scripts', async t => {
+  const input = scriptGenerationSchema.parse({ ...brief, locales: ['en-US', 'fr-CA'], speakers: 1 });
+  const script = (locale: string, text: string) => ({ script: { locale, utterances: [{ speaker: 1 as const, text }] } });
+  const original = [script('en-US', 'Original English.'), script('fr-CA', 'Bonjour.')];
+  const replacement = script('fr-CA', 'Salut.');
+  const controller = new AbortController();
+  let response: ScriptGenerationResult[number] = replacement;
+  const fetchMock = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    assert.equal(url, '/api/script-generation/generate');
+    assert.deepEqual(JSON.parse(String(init.body)), { ...input, locales: ['fr-CA'] });
+    assert.equal(init.signal, controller.signal);
+    return Response.json([response]);
+  });
+
+  const regenerated = await regenerateLocalePreview(input, original, 'fr-CA', controller.signal);
+  assert.deepEqual(regenerated, [original[0], replacement]);
+  assert.equal(regenerated[0], original[0]);
+  assert.equal(original[1].script.utterances[0].text, 'Bonjour.');
+
+  response = { locale: 'fr-CA', error: 'Rate limited', retryAfterMs: 0 };
+  await assert.rejects(regenerateLocalePreview(input, original, 'fr-CA', controller.signal), /Rate limited/);
+  assert.equal(original[1].script.utterances[0].text, 'Bonjour.');
+  assert.equal(fetchMock.mock.callCount(), 2);
+
+  controller.abort();
+  await assert.rejects(regenerateLocalePreview(input, original, 'fr-CA', controller.signal), { name: 'AbortError' });
+  assert.equal(fetchMock.mock.callCount(), 2);
 });
 
 test('generation input rejects invalid batches and paths in names', () => {

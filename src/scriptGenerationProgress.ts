@@ -61,6 +61,18 @@ export async function generateScriptPreview(
 
 export type ScriptRetryProgress = { generated: number; failed: number; retrying: number; nextRetryMs?: number };
 
+export async function regenerateLocalePreview(
+  input: ScriptGenerationRequest, results: ScriptGenerationResult, locale: string, signal: AbortSignal,
+): Promise<ScriptGenerationResult> {
+  const matchesLocale = (result: LocaleResult) => resultLocale(result).toLowerCase() === locale.toLowerCase();
+  if (!results.some(matchesLocale)) throw new Error('That locale is not in the preview.');
+  signal.throwIfAborted();
+  const [replacement] = await generateScriptPreview({ ...input, locales: [locale] }, () => {}, signal);
+  signal.throwIfAborted();
+  if ('error' in replacement) throw new Error(replacement.error);
+  return results.map(result => matchesLocale(result) ? replacement : result);
+}
+
 function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
