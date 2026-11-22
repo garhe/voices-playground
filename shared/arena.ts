@@ -59,9 +59,11 @@ export type ArenaCell = {
   dimensionScores?: { dimension: Dimension; label: string; score: number | null }[];
   voiceDescriptors?: VoiceDescriptors;
 };
+export type ArenaFilterVoice = { voice: string; model: string; gender: VoiceGender };
 export type ArenaReport = {
   id: string; name: string; createdAt: string; status: Job['status']; arena: ArenaMetadata;
   voices: number; eligibleVoices: number;
+  filterVoices?: ArenaFilterVoice[];
 };
 export type ArenaData = { cells: ArenaCell[]; reports: ArenaReport[] };
 
@@ -73,9 +75,16 @@ export function arenaData(jobs: Job[]): ArenaData {
     const summaries = summarize(job);
     const eligible = summaries.filter(row => job.status === 'completed' && row.score !== null && row.eligibleFiles === row.files);
     const descriptors = new Map(voiceDescriptorRows(job).map(row => [row.voice, row.labels]));
+    const genders = testNameMetadata(job.name ?? '').genders;
+    const voiceDetails = (voice: string): ArenaFilterVoice => ({
+      voice, model: studioVoiceModel({ ShortName: voice }),
+      gender: job.voiceLabels?.find(label => label.voice === voice)?.gender ??
+        (genders.length === 1 ? genders[0] : 'Unspecified'),
+    });
     reports.push({
       id: job.id, name: job.name ?? 'Arena test', createdAt: job.createdAt, status: job.status, arena: job.arena,
       voices: summaries.length, eligibleVoices: eligible.length,
+      filterVoices: [...new Set(job.clips.map(clip => clip.voice))].map(voiceDetails),
     });
     for (const row of eligible) {
       const { domain, locale } = job.arena;
@@ -84,11 +93,8 @@ export function arenaData(jobs: Job[]): ArenaData {
       if (cells.has(key)) continue;
       const panel = job.judges.map(judge => judge.deployment).sort().join(', ');
       const rubric = job.profile.rubric?.name ?? job.rubric;
-      const genders = testNameMetadata(job.name ?? '').genders;
-      const gender = job.voiceLabels?.find(label => label.voice === voice)?.gender ??
-        (genders.length === 1 ? genders[0] : 'Unspecified');
       cells.set(key, {
-        voice, model: studioVoiceModel({ ShortName: voice }), gender,
+        ...voiceDetails(voice),
         domain, locale, score: row.score!, jobId: job.id, createdAt: job.createdAt, files: row.files, panel, rubric,
         dimensionScores: activeDimensions(job.profile).map(dimension => ({
           dimension, label: dimensionLabel(job.profile, dimension), score: row.dimensions[dimension],

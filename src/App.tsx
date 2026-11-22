@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip, type TestQueueState, type EvaluationWorkspace,
-  dimensions, dimensionLabel, dimensionWeight, profileRubric, profileSchema, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, eligibleWeightedScore, WEIGHTED_PREFERENCE, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, evaluationWorkspace, testNameSchema, resolveLanguageHint,   rolesForScope, testType, ARENA_RUBRIC, DEFAULT_RUBRIC,
+  dimensions, dimensionLabel, dimensionWeight, profileRubric, profileSchema, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, eligibleWeightedScore, WEIGHTED_PREFERENCE, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, evaluationWorkspace, testNameSchema, resolveLanguageHint,   rolesForScope, testType, ARENA_RUBRIC, DEFAULT_RUBRIC, ISSUE_RATING_THRESHOLD,
 } from '../shared/domain';
 import { browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
   import { appendJudge, applyLanguageHint, displayLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric, withArenaRubric } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
-import { summarizeTtsIssues, ttsIssueStatus } from '../shared/ttsIssues';
-import { TtsIssueSummary } from './TtsIssueSummary';
+import { summarizeTtsIssues, ttsIssueDetails, ttsIssueStatus, type TtsIssueDetail } from '../shared/ttsIssues';
+import { TtsDetailsExport } from './TtsDetailsExport';
 import { VoiceDescriptorReport } from './VoiceDescriptorReport';
 import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
 import { canManageTest, canRetryUnassessedTest, testHistory, testMetadataSchema, testNameMetadata, testStatusLabel, testTableCsv, TEST_PAGE_SIZE, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
@@ -22,6 +22,7 @@ import { createHistoryLoader, workspaceHistory } from './historyLoader';
 import { droppedFiles, type ImportedFile } from './import';
 import { FolderSorter } from './FolderSorter';
 import { AudioPlayer } from './AudioPlayer';
+import { VoiceEvidenceTree } from './VoiceEvidenceTree';
 import { parseSortingPaths, type SortingPreview, type SortingResults } from '../shared/sorting';
 import type { BatchPreview, BatchTest } from '../shared/batch';
 import { BatchEvaluation } from './BatchEvaluation';
@@ -133,12 +134,14 @@ function exportVoiceEvidenceCsv(job: Job) {
 function EvidenceList({ notes, stage = 'audition' }: { notes: EvidenceNote[]; stage?: Profile['stage'] }) {
   return <ul>{notes.map(note => <li key={note.text}>{note.text}<small className="evidence-files">{mediaText(`${note.files.length} recording${note.files.length === 1 ? '' : 's'}`, stage)} · {note.files.join(' · ')}</small></li>)}</ul>;
 }
-function ImprovementEvidence({ judge, profile, dimension }: { judge: VoiceEvidence['judges'][number]; profile: Profile; dimension?: Dimension }) {
-  const areas = judge.dimensions.filter(d => (!dimension || d.dimension === dimension) && d.improvements.length);
-  return areas.length ? <>{areas.map(d => <div key={d.dimension}>
-    <h4>{dimensionLabel(profile, d.dimension)}: defects &amp; improvements</h4>
-    <EvidenceList notes={d.improvements} stage={profile.stage} />
-  </div>)}</> : <p className="hint">No specific defect / adjustment case was saved{dimension ? ' for this dimension' : ''}. This does not establish a perfect performance. Check the original reasons and limitations; run a new evaluation for explicit defect, cue, adjustment and pass-check feedback.</p>;
+function JudgeIssueGroup({ label, notes, stage }: { label: string; notes: EvidenceNote[]; stage: Profile['stage'] }) {
+  return <div>
+    <h3>{label}</h3>
+    <EvidenceList notes={notes.slice(0, 1)} stage={stage} />
+    {notes.length > 1 && <details><summary>More {label.toLowerCase()} ({notes.length - 1})</summary>
+      <EvidenceList notes={notes.slice(1)} stage={stage} />
+    </details>}
+  </div>;
 }
 function exportVoiceMatrixCsv(job: Job) {
   const notes = (values: EvidenceNote[]) => values.length ? values.map(note =>
@@ -164,58 +167,72 @@ function exportVoiceMatrixCsv(job: Job) {
   ]);
   download(`voice-judge-matrix-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
-function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }) {
+export function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }) {
   const sorting = useTableSort();
-  const rows = sorting.rows(voices, {
-    voice: row => `${row.voice} / ${row.role}`, preference: row => row.score, weighted: row => row.weightedScore,
+  const countIssues = (judge: VoiceEvidence['judges'][number] | undefined) =>
+    judge ? judge.limitations.length + judge.gaps.length + judge.dimensions.reduce((count, d) => count + d.issues.length, 0) : 0;
+  const rows = sorting.rows(voices.filter(voice => voice.judges.some(countIssues)), {
+    voice: row => `${row.voice} / ${row.role}`,
     ...Object.fromEntries(job.judges.map(judge => [`judge:${judge.id}`,
-      (row: VoiceEvidence) => row.judges.find(item => item.judgeId === judge.id)?.score])),
+      (row: VoiceEvidence) => countIssues(row.judges.find(item => item.judgeId === judge.id))])),
   });
-  const w = (text: string) => mediaText(text, job.profile.stage);
+  const stage = job.profile.stage;
   return <section className="card voice-matrix">
-    <div className="section-with-action"><h2>Judge comments matrix</h2><button className="secondary" onClick={() => exportVoiceMatrixCsv(job)}>Export matrix CSV</button></div>
-    <p className="hint">{w('Rows are voices and requested roles; columns are judges. These are original comments about strengths and concerns, not newly inferred pros/cons or a synthesized verdict. The first two overall comments are shown by recording frequency, then alphabetically; expand for the rest.')}</p>
-    <p className="hint">{w('Scores use eligible recordings only. Comments can also come from excluded recordings; each lists its sources. Single-judge scores are not full-panel scores. Incomplete recording coverage limits comparisons. The view and CSV include the complete evaluation with all comments and reasons.')}</p>
-    <div className="table-scroll matrix-scroll" tabIndex={0} role="region" aria-label="Scrollable judge comments matrix">
-      <table><caption>{evaluationName(job)} · Saved-evidence report · Scores out of 5, not MOS</caption>
-        <thead><tr>{sorting.header('voice', 'Voice / role')}{sorting.header('preference', 'Full-panel preference', 'descending')}{sorting.header('weighted', 'Weighted Preference', 'descending')}
+    <div className="section-with-action"><h2>Judge comments matrix</h2><div className="button-row">
+      <button className="secondary" onClick={() => exportVoiceMatrixCsv(job)}>Export matrix CSV</button>
+      {stage === 'tts' && <TtsDetailsExport job={job} />}
+    </div></div>
+    <p className="hint">Shows saved fixes, ratings below {ISSUE_RATING_THRESHOLD}/5, limitations, and scoring gaps. Export the matrix CSV for all scores and comments.</p>
+    {rows.length ? <div className="table-scroll matrix-scroll" tabIndex={0} role="region" aria-label="Scrollable judge comments matrix">
+      <table>
+        <thead><tr>{sorting.header('voice', 'Voice / role')}
           {job.judges.map(judge => sorting.header(`judge:${judge.id}`, <>{judge.name}<small>{judge.deployment}</small></>, 'descending'))}</tr></thead>
         <tbody>{rows.map(voice => <tr key={JSON.stringify([voice.voice, voice.role])}>
           <th scope="row"><strong>{voice.voice}</strong><small>{voice.role}</small></th>
-          <td><strong>{score(voice.score)}{voice.score !== null && ' / 5'}</strong><small>{voice.eligibleFiles}/{voice.files} {w('eligible recordings')}</small>{voice.eligibleFiles < voice.files && <p className="hint">Incomplete coverage</p>}</td>
-          <td><strong>{score(voice.weightedScore)}{voice.weightedScore !== null && ' / 5'}</strong><small>Natural / expressive emphasis</small></td>
           {voice.judges.map(judge => <td key={judge.judgeId}>
-            <p><strong>{score(judge.score)}{judge.score !== null && ' / 5'}</strong><small>Single-judge preference · {judge.scoredFiles}/{voice.files} {w('recordings scored')}</small></p>
-            <p><strong>{score(judge.weightedScore)}{judge.weightedScore !== null && ' / 5'}</strong><small>Single-judge Weighted Preference</small></p>
-            <h3>Overall comments</h3>
-            <ImprovementEvidence judge={judge} profile={job.profile} />
-            {judge.observations.length ? <EvidenceList notes={judge.observations.slice(0, 2)} stage={job.profile.stage} /> : <p>No overall comments recorded.</p>}
-            {judge.observations.length > 2 && <details><summary>More overall comments ({judge.observations.length - 2})</summary><EvidenceList notes={judge.observations.slice(2)} stage={job.profile.stage} /></details>}
-            <details><summary>Limitations ({judge.limitations.length})</summary>{judge.limitations.length ? <EvidenceList notes={judge.limitations} stage={job.profile.stage} /> : <p>No limitations recorded.</p>}</details>
-            <details open={judge.gaps.length > 0}><summary>Scoring gaps ({judge.gaps.length})</summary>{judge.gaps.length ? <EvidenceList notes={judge.gaps} stage={job.profile.stage} /> : <p>No scoring gaps reported.</p>}</details>
-            <h3>Dimension ratings</h3><ul className="matrix-ratings">{judge.dimensions.map(d => <li key={d.dimension}>{dimensionLabel(job.profile, d.dimension)}: <strong>{score(d.score)}</strong>{d.diagnostic && <small>Diagnostic only; excluded from preference</small>}</li>)}</ul>
-            <details><summary>Why these ratings / what to improve</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4><ImprovementEvidence judge={judge} profile={job.profile} dimension={d.dimension} />{d.reasons.length ? <EvidenceList notes={d.reasons} stage={job.profile.stage} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
+            {!countIssues(judge) && <span aria-label="No issues flagged">—</span>}
+            {judge.dimensions.filter(d => d.issues.length).map(d =>
+              <JudgeIssueGroup key={d.dimension} label={dimensionLabel(job.profile, d.dimension)} notes={d.issues} stage={stage} />)}
+            {judge.limitations.length > 0 && <JudgeIssueGroup label="Limitations" notes={judge.limitations} stage={stage} />}
+            {judge.gaps.length > 0 && <JudgeIssueGroup label="Scoring gaps" notes={judge.gaps} stage={stage} />}
           </td>)}
         </tr>)}
-          {!voices.length && <tr><td colSpan={job.judges.length + 3}>{w('No recording evidence is available yet.')}</td></tr>}
         </tbody>
       </table>
-    </div>
+    </div> : <p>{voices.length ? 'No judge issues or follow-up actions were recorded.' : mediaText('No recording evidence is available yet.', stage)}</p>}
   </section>;
 }
+export function ttsIssueCsvRows(job: Job): unknown[][] {
+  const rows: unknown[][] = [['test_name', 'domain', 'script_locale', 'voice', 'role', 'fully_assessed_files', 'total_files',
+    'summary_status', 'dimension', 'panel_score', 'example_file', 'start_sec', 'end_sec', 'judge', 'judge_rating', 'observation', 'cue',
+    ...rubricColumns, 'review_type', 'file_coverage', 'rubric_snapshot_location']];
+  type Voice = ReturnType<typeof summarizeTtsIssues>[number];
+  const rubric = rubricCells(job);
+  const snapshotIndex = rubricColumns.indexOf('rubric_snapshot');
+  const withoutSnapshot = rubric.map((value, index) => index === snapshotIndex ? undefined : value);
+  const voicesWithSnapshot = new Set<Voice>();
+  const add = (voice: Voice, detail: TtsIssueDetail) => {
+    const first = !voicesWithSnapshot.has(voice);
+    voicesWithSnapshot.add(voice);
+    rows.push([
+      evaluationName(job), voice.domain, voice.locale, voice.voice, voice.role, voice.eligibleFiles, voice.files,
+      ttsIssueStatus(voice), detail.dimension, detail.score, detail.file, detail.start, detail.end, detail.judge,
+      detail.rating, detail.observation, detail.cue, ...(first ? rubric : withoutSnapshot), detail.reviewType,
+      detail.fullyAssessed === undefined ? undefined : detail.fullyAssessed ? 'fully_assessed' : 'incomplete',
+      rubric[snapshotIndex] === undefined ? 'not_available' : first ? 'this_row' : 'first_row_for_voice_and_role',
+    ]);
+  };
+  for (const voice of summarizeTtsIssues(job)) {
+    const before = rows.length;
+    for (const detail of ttsIssueDetails(voice)) add(voice, detail);
+    if (rows.length === before) add(voice, { reviewType: 'status' });
+  }
+  return rows;
+}
+
 function exportCoachingCsv(job: Job) {
   if (job.profile.stage === 'tts') {
-    const rows: unknown[][] = [['test_name', 'domain', 'script_locale', 'voice', 'role', 'fully_assessed_files', 'total_files',
-      'summary_status', 'dimension', 'panel_score', 'example_file', 'start_sec', 'end_sec', 'judge', 'judge_rating', 'observation', 'cue', ...rubricColumns]];
-    for (const voice of summarizeTtsIssues(job)) {
-      for (const issue of voice.issues.length ? voice.issues : [undefined]) {
-        for (const example of issue?.examples.length ? issue.examples : [undefined]) rows.push([
-          evaluationName(job), voice.domain, voice.locale, voice.voice, voice.role, voice.eligibleFiles, voice.files,
-          ttsIssueStatus(voice), issue?.label, issue?.score, example?.file, example?.start, example?.end,
-          example?.judge, example?.rating, example?.observation, example?.cue, ...rubricCells(job),
-        ]);
-      }
-    }
+    const rows = ttsIssueCsvRows(job);
     download(`tts-issues-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
     return;
   }
@@ -370,6 +387,15 @@ function WorkspaceNotice({ message, role = 'alert', label = 'Dismiss notificatio
   </div>;
 }
 
+export function AudioSelectionActions({ total, included, busy, onChange }: {
+  total: number; included: number; busy: boolean; onChange: (include: boolean) => void;
+}) {
+  return <div className="audio-selection-actions" role="group" aria-label="Audio selection">
+    <button type="button" className="secondary" disabled={busy || included === total} onClick={() => onChange(true)}>Select all</button>
+    <button type="button" className="secondary" disabled={busy || included === 0} onClick={() => onChange(false)}>Deselect all</button>
+  </div>;
+}
+
 export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChange, onStarted, connectionStatus, reuseRequest, onReuseHandled, onNotice }: {
   arenaMode?: boolean; onConfigure?: (target?: AzureSettingsTarget) => void; onBusyChange?: (busy: boolean) => void;
   onStarted?: (job: Job) => Promise<void>;
@@ -389,7 +415,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
   const [recordingsOpen, setRecordingsOpen] = useState(true);
   const [testName, setTestName] = useState('');
   const [profile, setProfile] = useState<Profile>(() => arenaMode ? newTestProfile({
-    stage: 'tts', scope: 'single', speakerMode: 'automatic', language: 'auto', target: '',
+    stage: 'tts', scope: 'single', speakerMode: 'automatic', language: 'auto', target: '', arenaSpeechCheck: true,
   }, ARENA_RUBRIC) : newTestProfile());
   const freshProfile = (previous: Profile) => newTestProfile(previous, arenaMode ? ARENA_RUBRIC : DEFAULT_RUBRIC);
   const [arenaBusy, setArenaBusy] = useState(false);
@@ -810,6 +836,15 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
   const workspaceTitle = tab === 'sorting' ? 'Folder Sorting' : tab === 'studio' ? 'Azure Voices Studio'
     : tab === 'scripts' ? 'Script Generation' : isArena ? `Voice Arena / ${tab === 'arena-new' ? 'New test' : tab === 'arena-details' ? 'Detailed reports' : tab === 'arena-report' ? 'Test report' : 'Scorecard'}` : tab === 'settings' ? 'Azure Settings' : 'Voices Scoring';
   const scoringPage = tab === 'setup' ? 'Evaluation setup' : showTestList ? 'Test Reports' : 'Test details';
+  const queuePanel = (workspace: EvaluationWorkspace) => queue && <TestQueue state={queue} busy={navigationBusy}
+    workspace={workspace} history={history}
+    onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
+    onStart={() => void action('Starting queue', async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); })}
+    onCancel={id => void action('Cancelling test', async () => {
+      await api(`/api/jobs/${id}/cancel`, {});
+      if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
+      await refresh();
+    })} />;
 
   return <div className={arenaMode ? 'embedded-workbench' : 'app-shell'}>
     {!arenaMode && <aside className="sidebar">
@@ -864,15 +899,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
       </div>}
       {arenaMode && !onNotice && visibleNotice && <WorkspaceNotice key={notice} message={notice} onDismiss={() => setNotice('')} />}
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
-      {(isScoring || tab === 'arena-report') && queue && <TestQueue state={queue} busy={!!busy}
-        workspace={arenaMode || tab === 'arena-report' ? 'arena' : 'scoring'} history={history}
-        onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
-        onStart={() => void action('Starting queue', async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); })}
-        onCancel={id => void action('Cancelling test', async () => {
-          await api(`/api/jobs/${id}/cancel`, {});
-          if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
-          await refresh();
-        })} />}
+      {(isScoring || tab === 'arena-report') && queuePanel(arenaMode || tab === 'arena-report' ? 'arena' : 'scoring')}
       {(isScoring || tab === 'arena-report') && editingTest &&
         evaluationWorkspace(editingTest) === (arenaMode || tab === 'arena-report' ? 'arena' : 'scoring') &&
         <TestMetadataEditor key={editingTest.id} job={editingTest} busy={!!busy} onCancel={() => setEditingTest(undefined)}
@@ -920,6 +947,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
       <div hidden={!isArena || tab === 'arena-report'}><VoiceArena active={isArena && tab !== 'arena-report'} page={tab === 'arena-new' ? 'new' : tab === 'arena-details' ? 'details' : 'scorecard'} request={api} busy={navigationBusy}
         deletedIds={deletedArenaIds} onDelete={entries => { setConfirmBulk({ action: 'delete', entries, arena: true }); setBulkReport(undefined); setNotice(''); }}
         queue={tab === 'arena-details' && queue ? queueForWorkspace(queue, history, 'arena').state : undefined}
+        queuePanel={tab === 'arena-details' ? queuePanel('arena') : undefined}
         onPageChange={page => setTab(page === 'details' ? 'arena-details' : page === 'new' ? 'arena-new' : 'arena-scorecard')}
         newTest={<EvaluationWorkbench arenaMode onConfigure={openAzureSettings} onBusyChange={setArenaBusy} onNotice={setArenaNotice} connectionStatus={config}
           reuseRequest={arenaReuseRequest} onReuseHandled={() => setArenaReuseRequest(undefined)}
@@ -994,7 +1022,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
         </section>}
         {arenaMode && <section className="card arena-card" aria-label="Arena script matching">
           <h2>Required test scripts</h2>
-          <p className="hint">Scripts must be named &lt;locale&gt;_&lt;domain&gt;.txt, for example en-US_Customer_Services.txt. Audio filenames must match the scripts' Studio clip names. Single evaluation uses one language/domain; batch discovers and queues all language/domain tests. Judging stays audio-only.</p>
+          <p className="hint">Scripts must be named &lt;locale&gt;_&lt;domain&gt;.txt, for example en-US_Customer_Services.txt. Audio filenames must match the scripts' Studio clip names. Single evaluation uses one language/domain; batch discovers and queues all language/domain tests. Judges hear the audio and receive the matched script as a reference.</p>
           <label>Test scripts directory or file paths (one per line)<textarea rows={4} value={arenaScriptInput} disabled={!!busy}
             placeholder={'"C:\\Tests\\Scripts\\en-US_Customer_Services.txt"\n"C:\\Tests\\Scripts\\zh-CN_Customer_Services.txt"'}
             onChange={event => setArenaScriptInput(event.target.value)} /></label>
@@ -1037,6 +1065,8 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
             </>}
             <label><span>Target vocal style or test guide <span className="required-mark" aria-hidden="true">*</span></span><textarea required rows={2} maxLength={1500} value={profile.target} disabled={!!busy} aria-invalid={!profile.target.trim()} aria-describedby={!profile.target.trim() ? targetGuidanceId : undefined} onChange={e => setProfile({ ...profile, target: e.target.value })} placeholder="For example: warm, calm, conversational and effortless to listen to" /></label>
             {!profile.target.trim() && <p id={targetGuidanceId} className="hint" role="status">Add a vocal style or test guide to start.</p>}
+            {arenaMode && <><label className="checkbox-label"><input type="checkbox" disabled={!!busy} checked={profile.arenaSpeechCheck === true} onChange={e => setProfile(previous => ({ ...previous, arenaSpeechCheck: e.target.checked }))} />Additional Azure Speech review flags</label>
+              <p className="hint">Sends each audio window to Azure Speech for transient transcription and speaker labeling, in addition to the judges. This adds one billable Speech request per window. Results are possible issues for human review, not score deductions; recognition and speaker labels can be wrong. Transcript text is not saved. Requires a configured Azure Speech resource.</p></>}
             <RubricEditor profile={profile} presets={rubricPresets} busy={!!busy} stages={arenaMode ? ['tts'] : undefined}
               onChange={rubric => setProfile(previous => withRubric(previous, rubric))}
               onSelect={rubric => setProfile(previous => withRubric(previous, rubric))}
@@ -1119,6 +1149,8 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
           {savedClips !== undefined ? <>
             <p className="hint">{setupText('Reusing saved audio inputs, not the original full recordings. Original ranges, channels and speaker-selection mode are preserved. You can change voices and language hints or exclude inputs. Keep the required roles for each recording; select a folder to replace these inputs and edit ranges or speaker mode.')}</p>
             {!savedClips.length && <p role="alert">No saved audio is available. Select the original folder to continue.</p>}
+            {savedClips.length > 0 && <AudioSelectionActions total={savedClips.length} included={includedInputs.length} busy={!!busy}
+              onChange={include => setSavedClips(old => old?.map(clip => clip.include === include ? clip : { ...clip, include }))} />}
             {savedClips.map(c => <div className="card" key={c.id}>
               <label className="checkbox-label"><input type="checkbox" disabled={!!busy} checked={c.include} onChange={e => setSavedClips(old => old?.map(value => value.id === c.id ? { ...value, include: e.target.checked } : value))} />{c.file} · {c.role} · {c.start.toFixed(2)}–{c.end.toFixed(2)} s · {c.channel}</label>
               <div className="field-row"><label>Voice<input value={c.voice} maxLength={200} disabled={!!busy} onChange={e => setSavedClips(old => old?.map(value => value.id === c.id ? { ...value, voice: e.target.value } : value))} /></label>
@@ -1126,7 +1158,10 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
               <AudioPlayer src={`/api/clips/${c.id}/audio`} label={`Saved input ${c.file} ${c.role}`} />
             </div>)}
           </> : records.length > 0 ?
-            <><div className="collection-bar"><span><strong>{voiceCount}</strong> voices <b>·</b> <strong>{included.length}</strong> {setupText('recordings')} {profile.speakerMode !== 'automatic' && <><b>·</b> <strong>{confirmed}</strong> reviewed</>}</span><span>{profile.speakerMode === 'automatic' ? 'Automatic role listening — no file confirmations needed' : 'Review speaker regions before running'}</span></div>
+            <><div className="collection-bar"><span><strong>{voiceCount}</strong> voices <b>·</b> <strong>{included.length}</strong> {setupText('recordings')} {profile.speakerMode !== 'automatic' && <><b>·</b> <strong>{confirmed}</strong> reviewed</>}</span><span>{profile.speakerMode === 'automatic' ? 'Automatic role listening — no file confirmations needed' : 'Review speaker regions before running'}</span>
+              <AudioSelectionActions total={records.length} included={included.length} busy={!!busy}
+                onChange={include => setRecords(old => old.map(record => record.include === include ? record : { ...record, include }))} />
+            </div>
               <div className="recording-workspace"><div className="file-list">{records.map(r => <div key={r.id} className={`file-row ${r.id === selected ? 'selected' : ''}`}>
                 <input aria-label={`Include ${r.path}`} type="checkbox" checked={r.include} onChange={e => updateRecording(r.id, { include: e.target.checked })} />
                 <button onClick={() => setSelected(r.id)}><strong>{r.voice}</strong><span>{r.file.name}</span></button>
@@ -1166,7 +1201,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
         </details>}
         </div>
         {setupMode === 'single' && <><section className="run-card"><div><h3>Ready for a closer listen?</h3><p>{profile.speakerMode === 'automatic' && included.some(r => r.duration === undefined) ? 'At least ' : ''}{plannedInputs} role/audio inputs × {config?.judges.length ?? 0} judges. {profile.scope === 'both' && 'Both roles use separate assessments of the same conversation. '}Azure usage is billed per your deployment; no cost estimate is available.</p>
-          <small>Automatic mode sends conversation windows; manual mode sends selected excerpts. Missing-audio claims, zero audio-token responses or exhausted format retries may trigger one fresh-session re-upload. Each session allows one format retry, within a total 180-second deadline. Retries incur additional Azure usage and never force scores. Audio inputs, names, ratings and results persist unencrypted on this computer. No transcript is requested or stored.</small>
+          <small>Automatic mode sends conversation windows; manual mode sends selected excerpts. Missing-audio claims, zero audio-token responses or exhausted format retries may trigger one fresh-session re-upload. Each session allows one format retry, within a total 180-second deadline. Retries incur additional Azure usage and never force scores. Audio inputs, names, ratings and results persist unencrypted on this computer. {arenaMode && profile.arenaSpeechCheck ? 'Azure Speech transcribes audio for review flags; its transcript is not saved or sent to judges.' : 'No transcript is requested or stored.'}</small>
           <div id={readinessId} className={`evaluation-readiness ${queueBlockers.length ? '' : 'ready'}`} role="status" aria-live="polite">
             {queueBlockers.length ? <><strong>Before you can start or queue</strong><ul>{queueBlockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul></> : <strong>Ready to start or add to queue.</strong>}
           </div>
@@ -1221,7 +1256,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
               <p>Duration measures the length of the saved audio, not the presence of speech or of the requested speaker. Quiet-sample measurements are not speech detection.</p>
               {job.profile.speakerMode === 'automatic' && <p>In automatic-role mode, “no speech from the requested role” can mean the judge did not identify that role, even when another speaker is audible. Role attribution is a model judgment and can be wrong.</p>}
               <p>{reportText('“Unknown” means the judge did not reliably identify the language for that assessment; it does not prove that the recording has no identifiable language. Limited speech, role uncertainty, audio quality or a model/audio-delivery error are possible explanations, not confirmed causes.')}</p>
-              <p>{reportText('Listen to the exact saved input below. Its language hint is guidance, not verified language detection. Audio-delivery diagnostics in “Listen, inspect, decide” show upload/token evidence where available, but cannot prove that the model heard or interpreted the recording correctly.')}</p>
+              <p>{reportText('Listen to the exact saved input in “Voice top issues & judge evidence.” The language hint is guidance, not verified language detection. Use Export JSON for saved upload and token diagnostics; they cannot prove the model heard the recording correctly.')}</p>
               <p>If you want to assess a single voice regardless of agent/customer meaning, use Edit inputs and choose Single speaker for a new test. Existing judgments are not changed.</p>
             </details>
             {retryBlocked && <p className="hint">{retryHint}</p>}
@@ -1257,59 +1292,8 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
           </section>
           <VoiceJudgeMatrix job={job} voices={voiceEvidence} />
           <VoiceDescriptorReport job={job} />
-          {job.profile.stage === 'tts'
-            ? <TtsIssueSummary voices={summarizeTtsIssues(job)} onExport={() => exportCoachingCsv(job)} />
-            : <VoiceImprovement job={job} voices={voiceDirectorBriefs(job)} />}
-          <section className="card voice-evidence"><h2>Voice issues &amp; judge evidence</h2>
-            <p className="hint">{reportText('Compiled locally from saved judge comments, not a new model opinion. Observations can include strengths as well as concerns. Identical comments are grouped by distinct recording, not window count; paraphrases are not merged. Judges and roles remain separate. This view and exports include the full evaluation.')}</p>
-            {voiceEvidence.map(voice => <details key={JSON.stringify([voice.voice, voice.role])}>
-              <summary><strong>{voice.voice} / {voice.role}</strong> · {voice.eligibleFiles}/{voice.files} files in the full-panel average</summary>
-              {voice.judges.map(evidence => {
-                const judge = job.judges.find(j => j.id === evidence.judgeId)!;
-                return <article key={evidence.judgeId}><h3>{judge.name}</h3><p className="hint">{judge.deployment} · {evidence.scoredFiles}/{voice.files} files scored by this judge. {reportText('A full-panel recording still requires every judge.')}</p>
-                  <h4>Defects found &amp; what to improve</h4>
-                  <ImprovementEvidence judge={evidence} profile={job.profile} />
-                  <h4>Scoring gaps and role / language limitations</h4>
-                  {evidence.gaps.length ? <EvidenceList notes={evidence.gaps} stage={job.profile.stage} /> : <p>No scoring gaps reported.</p>}
-                  <details><summary>Reported observations ({evidence.observations.length} distinct comments)</summary>{evidence.observations.length ? <EvidenceList notes={evidence.observations} stage={job.profile.stage} /> : <p>No observations recorded.</p>}</details>
-                  <details><summary>Reported limitations ({evidence.limitations.length} distinct comments)</summary>{evidence.limitations.length ? <EvidenceList notes={evidence.limitations} stage={job.profile.stage} /> : <p>No limitations recorded.</p>}</details>
-                  <details><summary>Dimension evidence</summary>{evidence.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic ? ' (diagnostic only)' : ''}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} stage={job.profile.stage} /> : <p>No scored evidence available.</p>}</div>)}</details>
-                </article>;
-              })}
-            </details>)}
-          </section>
-          <section className="card"><h2>Listen, inspect, decide</h2><p className="hint">Saved audio is the exact resampled input evaluated. {job.profile.speakerMode === 'automatic' ? 'Automatic inputs contain the conversation, not isolated target-speaker audio. Technical diagnostics describe the whole input window, not an individual role. ' : 'Quality diagnostics describe the selected input, not the original master file. '}Quiet-sample percentage is not a speech detector.</p>
-            {job.clips.map(c => <details className="clip-detail" key={c.id}><summary><span><strong>{c.voice}</strong> / {c.role}<small>{c.file} · {c.start.toFixed(1)}–{c.end.toFixed(1)}s · {c.channel} · language hint: {displayLanguageHint(c.language)}</small></span><span className="pill">{job.results.filter(r => r.clipId === c.id && r.status === 'completed').length}/{job.judges.length} judges</span></summary>
-              <AudioPlayer src={`/api/clips/${c.id}/audio`} label={job.profile.speakerMode === 'automatic' ? `${c.voice} conversation window for ${c.role} assessment` : `${c.voice} ${c.role} excerpt`} />
-              <div className="technical"><span>Peak: {c.technical.peakDb?.toFixed(1) ?? '−∞'} dBFS</span><span>RMS: {c.technical.rmsDb?.toFixed(1) ?? '−∞'} dBFS</span><span>Near-full-scale samples: {c.technical.clippingPercent.toFixed(2)}%</span><span>Quiet samples: {c.technical.quietPercent.toFixed(1)}%</span></div>
-              <div className="judge-results">{job.results.filter(r => r.clipId === c.id).map(r => {
-                const judge = job.judges.find(j => j.id === r.judgeId)!;
-                return <article key={r.judgeId}><h3>{judge.name}<span className={`status-badge ${r.status}`}>{r.status}</span></h3><small>{judge.deployment}{r.model ? ` · reported: ${r.model}` : ''}</small>
-                  {r.responseFormat && <p className="hint">{r.responseFormat === 'function_call' ? 'Output: validated assessment function.' : r.responseFormat === 'function_call_with_preamble' ? 'Output: validated assessment function with an allowed acknowledgement or intent preamble ignored. All scores and evidence come from the function arguments, not the preamble.' : r.responseFormat === 'json_text' ? 'Output: validated JSON text. The deployment returned text instead of the requested function call.' : 'Output: validated JSON text with surrounding formatting removed. No scores or fields were repaired.'}</p>}
-                  {r.error && <p className="error-text">{r.error}</p>}
-                  {r.audioDiagnostics ? <details><summary>Audio-delivery diagnostics · {r.audioDiagnostics.recovery.replaceAll('_', ' ')}</summary>
-                    <p className="hint">Input: {r.audioDiagnostics.inputBytes} bytes · SHA-256: {r.audioDiagnostics.inputSha256}. Matching hashes verify identical PCM input, not identical model judgments. Audio tokens confirm service accounting, not perceptual accuracy.</p>
-                    {r.audioDiagnostics.sessions.map((session, index) => <div key={index}><h4>Session {index + 1} · {session.model ?? 'Model not reported'}</h4>
-                      <p className="hint">{session.uploadedBytes} bytes uploaded · {session.committed ? 'Azure confirmed audio commit' : 'Audio commit not confirmed'}</p>
-                      {session.error && <p className="error-text">{session.error}</p>}
-                      <ul>{session.responses.map((response, i) => <li key={i}>Response {i + 1}: {response.outcome.replaceAll('_', ' ')} · Input audio tokens: {response.inputAudioTokens ?? 'not reported'} · Input text tokens: {response.inputTextTokens ?? 'not reported'} · Output tokens: {response.outputTokens ?? 'not reported'} · Output types: {response.outputTypes.join(', ')}</li>)}</ul>
-                    </div>)}
-                  </details> : retryableAudioIssue(r) && <p className="hint">This saved verdict has no audio-delivery telemetry. A targeted retry will collect it.</p>}
-                  {!!r.previousEvaluations?.length && <details><summary>Previous evaluation audit history ({r.previousEvaluations.length})</summary>
-                    {r.previousEvaluations.map((previous, i) => <div key={i}><h4>Retried {new Date(previous.retriedAt).toLocaleString()} · {previous.status}</h4>
-                      {previous.error && <p className="error-text">{previous.error}</p>}
-                      {previous.assessment && <p>{previous.assessment.language} · {previous.assessment.assessable ? 'Assessable' : 'Unassessable'} · {previous.assessment.limitations.join(' ')}</p>}
-                      <p className="hint">Complete previous scores, reasons and diagnostics are preserved in JSON and assessment CSV exports.</p>
-                    </div>)}
-                  </details>}
-                  {r.status === 'completed' && assessmentGaps(r, job.profile, c.role).length > 0 && <div className="callout"><strong>Why this assessment cannot supply a preference score</strong><ul>{assessmentGaps(r, job.profile, c.role).map(gap => <li key={gap}>{gap}</li>)}</ul></div>}
-                  {r.assessment && <>{r.assessment.speakerAttribution && <div className="callout"><strong>{r.assessment.speakerAttribution.status === 'single_speaker_fallback' ? 'Single-speaker fallback — requested agent not identified' : `Role: ${r.assessment.speakerAttribution.role} · ${r.assessment.speakerAttribution.status}`}</strong><p>{r.assessment.speakerAttribution.evidence}</p></div>}<p className="hint">{r.assessment.language} · {r.assessment.languageSupported ? 'Model reports language assessable (not independently validated)' : 'Language not reliably supported'} · preference: {score(eligibleScore(r.assessment, job.profile))} · Weighted Preference: {score(eligibleWeightedScore(r.assessment, job.profile))}</p>
-                    <dl>{dimensions.map(d => <div key={d}><dt>{dimensionLabel(job.profile, d)} {d === 'audioQuality' && !activeDimensions(job.profile).includes(d) && <small>(diagnostic)</small>}<b>{score(r.assessment!.scores[d])}</b></dt><dd>{r.assessment!.reasons[d] ?? (d === 'accentFit' ? 'Not assessed in this saved evaluation.' : '')}</dd></div>)}</dl>
-                    {!!r.assessment.observations.length && <><h4>Observations</h4><ul>{r.assessment.observations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}
-                    {!!r.assessment.limitations.length && <><h4>Limitations</h4><ul className="limitations">{r.assessment.limitations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}</>}
-                </article>;
-              })}</div></details>)}
-          </section>
+          {job.profile.stage !== 'tts' && <VoiceImprovement job={job} voices={voiceDirectorBriefs(job)} />}
+          <VoiceEvidenceTree job={job} />
         </>}
         </div>}
       </>}

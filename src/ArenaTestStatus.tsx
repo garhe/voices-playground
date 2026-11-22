@@ -1,14 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { ArenaMetadata, ArenaReport } from '../shared/arena';
 import type { Job, TestQueueState } from '../shared/domain';
 import { canManageTest, testStatusLabel } from '../shared/history';
 import { runningAssessments } from './EvaluationProgress';
 import { useTableSort } from './TableSort';
+import { arenaReportMatch, type ArenaDetailSelection } from './arenaDetails';
 
 type Props = {
   reports: ArenaReport[];
   reportsLoaded: boolean;
   queue?: TestQueueState;
+  queuePanel?: ReactNode;
+  filters?: ReactNode;
+  selection?: ArenaDetailSelection;
   activity?: { job?: Job; error?: string };
   busy: boolean;
   onOpen: (id: string) => void;
@@ -63,7 +67,7 @@ function ArenaLiveActivity({ name, arena, job, error, queue }: {
   </section>;
 }
 
-export function ArenaTestStatus({ reports, reportsLoaded, queue, activity, busy, onOpen, onDelete }: Props) {
+export function ArenaTestStatus({ reports, reportsLoaded, queue, queuePanel, filters, selection, activity, busy, onOpen, onDelete }: Props) {
   const sorting = useTableSort();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const selectAll = useRef<HTMLInputElement>(null);
@@ -79,11 +83,6 @@ export function ArenaTestStatus({ reports, reportsLoaded, queue, activity, busy,
   const eligible = other.filter(canManageTest);
   const eligibleIds = new Set(eligible.map(report => report.id));
   const selected = eligible.filter(report => selectedIds.has(report.id));
-  const allSelected = eligible.length > 0 && selected.length === eligible.length;
-  const partiallySelected = selected.length > 0 && !allSelected;
-  useEffect(() => {
-    if (selectAll.current) selectAll.current.indeterminate = partiallySelected;
-  }, [partiallySelected]);
   function select(ids: string[], checked: boolean) {
     setSelectedIds(previous => {
       const next = new Set([...previous].filter(id => eligibleIds.has(id)));
@@ -105,29 +104,45 @@ export function ArenaTestStatus({ reports, reportsLoaded, queue, activity, busy,
     })),
   ];
   const scriptsFor = (id: string, report?: ArenaReport) => (id === activeJob?.id ? activeJob?.arena : undefined) ?? report?.arena;
-  const sortedRows = sorting.rows(rows, {
+  const matches = rows.map(row => ({ row, match: selection ? arenaReportMatch(row.report, selection) : 'match' as const }));
+  const unavailable = matches.filter(item => item.match === 'unavailable').length;
+  const filteredRows = matches.filter(item => item.match === 'match').map(item => item.row);
+  const eligibleVisible = filteredRows.filter(row => eligibleIds.has(row.id));
+  const selectedVisible = eligibleVisible.filter(row => selectedIds.has(row.id)).length;
+  const allSelected = eligibleVisible.length > 0 && selectedVisible === eligibleVisible.length;
+  const partiallySelected = selectedVisible > 0 && !allSelected;
+  useEffect(() => {
+    if (selectAll.current) selectAll.current.indeterminate = partiallySelected;
+  }, [partiallySelected]);
+  const sortedRows = sorting.rows(filteredRows, {
     test: row => row.name, domain: row => row.report && `${row.report.arena.domain} / ${row.report.arena.locale}`,
     status: row => row.status && testStatusLabel({ status: row.status }),
     scripts: row => scriptsFor(row.id, row.report)?.scripts.join(', '),
     created: row => row.report && Date.parse(row.report.createdAt), voices: row => row.report?.eligibleVoices,
   });
+  const status = (queue
+    ? `${queue.active ? 1 : 0} running · ${queue.waiting.length} queued${queue.paused ? ' · Shared queue paused' : ''}`
+    : 'Loading live queue…') + (reportsLoaded ? ` · ${other.filter(report => report.status === 'completed').length} completed` : '');
   return <section className="card arena-card" aria-label="Arena test status">
     <h2>Arena test status</h2>
-    <p role="status">{queue
-      ? `${queue.active ? 1 : 0} running · ${queue.waiting.length} queued${queue.paused ? ' · Shared queue paused' : ''}`
-      : 'Loading live queue…'}{reportsLoaded && ` · ${other.filter(report => report.status === 'completed').length} completed`}</p>
-    <p className="hint">Shows tests across all Arena domains. By default, running and queued tests appear first. Sorting does not change queue order. Queue positions count Arena tests only; Voices Scoring shares the underlying queue.</p>
+    <p role="status">{status}</p>
+    {queuePanel}
+    {filters && <div className="field-row filter-bar">{filters}</div>}
+    <p className="hint">Filters also apply to the voice and locale breakdown below, but not the queue or status counts. By default, running and queued tests appear first. Sorting does not change queue order. Queue positions count Arena tests only; Voices Scoring shares the underlying queue.</p>
+    {unavailable > 0 && <p role="alert" className="error-text">{unavailable} {unavailable === 1 ? 'test is' : 'tests are'} omitted because filter metadata is unavailable. Wait for the reports to refresh; if this persists, restart the local app when safe.</p>}
     {queue && activeTest && <ArenaLiveActivity name={activeTest.name} arena={activeJob?.arena ?? saved.get(activeTest.id)?.arena}
       job={activeJob} error={activity?.error} queue={queue} />}
     {!rows.length ? <p>{reportsLoaded && queue ? 'No Arena tests yet.' : 'Waiting for test status…'}</p> :
       <><div className="button-row">
         <button type="button" className="secondary danger" disabled={busy || !selected.length} onClick={() => onDelete(selected.map(({ id, name }) => ({ id, name })))}>Delete selected</button>
-        <span role="status">{selected.length} selected</span>
+        <span role="status">{selected.length} selected{selected.length > selectedVisible ? ' (including hidden tests)' : ''}</span>
+        {!!selected.length && <button type="button" className="text-button" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear selection</button>}
       </div>
+      {!filteredRows.length ? <p role="status">{unavailable ? 'No confirmed matches; some tests could not be checked.' : 'No tests match the selected filters.'}</p> :
       <div className="table-scroll table-scroll--with-selection arena-reports" tabIndex={0} role="region" aria-label="Arena test list"><table>
         <thead><tr><th scope="col" className="arena-report-select"><input ref={selectAll} type="checkbox"
-          aria-label="Select all eligible Arena reports" title="Select all eligible Arena reports" disabled={busy || !eligible.length}
-          checked={allSelected} onChange={event => select(eligible.map(report => report.id), event.target.checked)} /></th>
+          aria-label="Select all eligible matching Arena reports" title="Select all eligible matching Arena reports" disabled={busy || !eligibleVisible.length}
+          checked={allSelected} onChange={event => select(eligibleVisible.map(row => row.id), event.target.checked)} /></th>
           {sorting.header('test', 'Test')}{sorting.header('domain', 'Domain / locale')}{sorting.header('status', 'Status')}{sorting.header('scripts', 'Scripts')}{sorting.header('created', 'Created', 'descending')}{sorting.header('voices', 'Fully assessed voices', 'descending')}<th scope="col">Report</th></tr></thead>
         <tbody>{sortedRows.map(({ id, name, report, status, position, retry, retryCount }) => <tr key={id}>
           <td className="arena-report-select"><input type="checkbox" aria-label={`Select Arena report ${name}`}
@@ -145,6 +160,6 @@ export function ArenaTestStatus({ reports, reportsLoaded, queue, activity, busy,
           <td>{report ? `${report.eligibleVoices} / ${report.voices}` : '—'}</td>
           <td><button className="text-button" disabled={busy} onClick={() => onOpen(id)}>Open report</button></td>
         </tr>)}</tbody>
-      </table></div></>}
+      </table></div>}</>}
   </section>;
 }

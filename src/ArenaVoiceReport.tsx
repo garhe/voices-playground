@@ -1,10 +1,9 @@
 import {
-  activeDimensions, assessmentGaps, dimensionLabel, summarize, summarizeVoiceEvidence,
+  activeDimensions, dimensionLabel, summarize, summarizeVoiceEvidence,
   type EvidenceNote, type Job,
 } from '../shared/domain';
-import { AudioPlayer } from './AudioPlayer';
-import { summarizeTtsIssues } from '../shared/ttsIssues';
-import { TtsIssueSummary } from './TtsIssueSummary';
+import { VoiceEvidenceTree } from './VoiceEvidenceTree';
+import { TtsDetailsExport } from './TtsDetailsExport';
 import { unassessedDescriptor, voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors';
 import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
 
@@ -29,6 +28,15 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
   const evidence = summarizeVoiceEvidence(selected)[0];
   if (!job.arena || !summary || !evidence)
     return <p role="alert">This Arena report has no saved single-speaker evidence for the selected voice.</p>;
+  const speechFlags = clips.filter(clip => {
+    const check = clip.speechCheck;
+    return check?.status === 'completed' && (check.speaker.status === 'possible_change' ||
+      (check.text.status === 'compared' && !!(check.text.missing || check.text.added || check.text.substituted)));
+  }).length;
+  const speechUnavailable = clips.filter(clip => {
+    const check = clip.speechCheck;
+    return !check || check.status === 'failed' || check.text.status === 'unavailable' || check.speaker.status === 'unavailable';
+  }).length;
   const orderedDimensions = activeDimensions(job.profile).sort((a, b) => {
     const left = summary.dimensions[a], right = summary.dimensions[b];
     return left === null ? right === null ? 0 : 1 : right === null ? -1 : left - right;
@@ -39,24 +47,21 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
     ...Object.fromEntries(evidence.judges.map(judge => [`judge:${judge.judgeId}`,
       (dimension: typeof orderedDimensions[number]) => judge.dimensions.find(item => item.dimension === dimension)?.score])),
   });
-  const files = [...new Set(clips.map(clip => clip.file))].map(file => {
-    const fileClips = clips.filter(clip => clip.file === file);
-    return { file, clips: fileClips, summary: summarize({ ...selected, clips: fileClips })[0] };
-  }).sort((a, b) => {
-    const left = a.summary.score, right = b.summary.score;
-    return left === null ? right === null ? a.file.localeCompare(b.file) : 1 : right === null ? -1 : left - right;
-  });
   return <div className="arena-detail-report">
     <section className="card arena-card" aria-label="Selected voice report">
       <div className="section-with-action"><h2>{voice} · {job.arena.locale}</h2>
-        <button className="secondary" disabled={busy} onClick={() => onOpen(job.id)}>Open full test report</button>
+        <div className="button-row">
+          {job.profile.stage === 'tts' && <TtsDetailsExport job={selected} />}
+          <button className="secondary" disabled={busy} onClick={() => onOpen(job.id)}>Open full test report</button>
+        </div>
       </div>
       <p>{job.arena.domain} · {job.name || 'Arena test'} · {new Date(job.createdAt).toLocaleString()} · {job.status}</p>
       <p><strong>Overall preference: {rating(summary.score)}</strong> · {summary.eligibleFiles}/{summary.files} fully assessed files</p>
       {(job.status !== 'completed' || summary.eligibleFiles !== summary.files) &&
         <p role="status" className="hint">Incomplete coverage. This report is not currently eligible for the scorecard; any displayed averages use eligible files only.</p>}
       <p className="hint">Saved rubric: {job.profile.rubric?.name ?? job.rubric}. Panel: {job.judges.map(judge => `${judge.name} (${judge.deployment})`).join(', ')}.</p>
-      <p className="hint">Scores are uncalibrated AI opinions, not MOS. Lowest scores are shown first, not an absolute failure threshold. These are saved assessments, not a new AI evaluation. Judges hear audio only; script omissions and text accuracy are not checked.</p>
+      <p className="hint">Scores are uncalibrated AI opinions, not MOS. Lowest scores are shown first, not an absolute failure threshold. These are saved assessments, not a new AI evaluation. When a reference is available, judges can compare it with the audio; their findings are not independently guaranteed.</p>
+      {job.profile.arenaSpeechCheck && <p role="status">Azure Speech review: {speechFlags} window(s) flagged; {speechUnavailable} window(s) have an incomplete or unavailable check. See the detailed export for the flags. They do not change scores.</p>}
     </section>
     {descriptors && <section className="card arena-card" aria-label="Top voice descriptors">
       <h2>Top voice descriptors</h2>
@@ -65,7 +70,6 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
         <dt>{voiceDescriptorFields[key].label}</dt><dd>{descriptors[key] ?? unassessedDescriptor}</dd>
       </div>)}</dl>
     </section>}
-    {job.profile.stage === 'tts' && <TtsIssueSummary voices={summarizeTtsIssues(selected)} />}
     <section className="card arena-card" aria-label="Dimension breakdown">
       <h2>Dimension breakdown</h2>
       <p className="hint">Full-panel averages use the same duration-weighted windows and equal-weight files as the scorecard. Each judge column is a single-judge average, not panel consensus. Missing ratings are not zero.</p>
@@ -98,29 +102,7 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
         })}
       </details>)}
     </section>
-    <section className="card arena-card" aria-label="Recording breakdown">
-      <h2>Recording breakdown · lowest first</h2>
-      <p className="hint">Expand a file to locate lower-scoring listening windows, read each judge’s original evidence and play the exact evaluated audio. Times are source-file window boundaries, not exact defect locations.</p>
-      {files.map(file => <details key={file.file}>
-        <summary><strong>{file.file}</strong> · {rating(file.summary.score)} · {file.clips.length} listening windows</summary>
-        {file.clips.map(clip => <article className="arena-recording-window" key={clip.id}>
-          <h3>{clip.start.toFixed(1)}–{clip.end.toFixed(1)}s · {clip.channel}</h3>
-          <AudioPlayer src={`/api/clips/${clip.id}/audio`} label={`${voice}, ${job.arena!.locale}, ${clip.file}, ${clip.start} to ${clip.end} seconds`} />
-          {job.judges.map(judge => {
-            const result = job.results.find(item => item.clipId === clip.id && item.judgeId === judge.id);
-            const gaps = assessmentGaps(result, job.profile, clip.role);
-            return <details key={judge.id}>
-              <summary>{judge.name} · {result?.status ?? 'missing'}{gaps.length > 0 && ' · scoring gaps'}</summary>
-              {!!gaps.length && <ul className="error-text">{gaps.map(gap => <li key={gap}>{gap}</li>)}</ul>}
-              {result?.assessment && <dl>{orderedDimensions.map(dimension => <div key={dimension}>
-                <dt><strong>{dimensionLabel(job.profile, dimension)} · {rating(result.assessment!.scores[dimension])}</strong></dt>
-                <dd>{result.assessment!.reasons[dimension] || 'No reason saved.'}</dd>
-              </div>)}</dl>}
-            </details>;
-          })}
-        </article>)}
-      </details>)}
-    </section>
+    <VoiceEvidenceTree job={selected} />
     <section className="card arena-card" aria-label="Judge limitations and gaps">
       <h2>Scoring gaps &amp; limitations</h2>
       {evidence.judges.map((judge, index) => <details key={judge.judgeId} open={judge.gaps.length > 0}>

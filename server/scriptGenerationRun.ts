@@ -5,6 +5,7 @@ import type { GeneratedScript, ScriptGenerationRequest, ScriptGenerationRun, Scr
 const retryable = (result: ScriptGenerationRun['results'][number]) => 'error' in result && result.retryAfterMs !== undefined;
 const localeOf = (result: ScriptGenerationRun['results'][number]) => 'script' in result ? result.script.locale : result.locale;
 const initialBackoff = 1000;
+const maxRegenerationRetryDelay = 2000;
 const nextBackoff = (backoff: number) => Math.min(backoff * 2, 30_000);
 type GenerateLocale = (locale: ScriptLocaleOption, signal: AbortSignal, previousError?: string, previousScript?: GeneratedScript) => Promise<GeneratedScript>;
 export const batchIsActive = (state: ScriptGenerationRun['state']) =>
@@ -177,10 +178,10 @@ export class ScriptGenerationRuns {
         const retryAfterMs = this.retryDelay(error);
         if (retryAfterMs === undefined) throw error;
         previousError = this.redact(error);
-        const delay = Math.max(backoff, retryAfterMs);
+        const delay = Math.min(maxRegenerationRetryDelay, Math.max(backoff, retryAfterMs));
         update(`${previousError} Retrying in ${Math.ceil(delay / 1000)} s.`);
         await sleep(delay, undefined, { signal });
-        backoff = nextBackoff(backoff);
+        backoff = Math.min(backoff * 2, maxRegenerationRetryDelay);
       }
     }
   }

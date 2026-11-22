@@ -3,6 +3,7 @@ import type { ArenaCell } from '../shared/arena';
 import { activeDimensions, ARENA_RUBRIC, assessmentGaps, dimensionLabel, dimensions as ratingDimensions, summarize, summarizeVoiceEvidence, type Job } from '../shared/domain';
 import { unassessedDescriptor, voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors';
 import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
+import { ttsIssueDetails, ttsIssueStatus, type TtsIssueSummary } from '../shared/ttsIssues';
 import { arenaVoiceName } from './arenaDetails';
 import type { ArenaComparisonView } from './ArenaDimensionComparison';
 
@@ -150,6 +151,32 @@ export function arenaComparisonWorkbook(rows: readonly ArenaCell[], view: ArenaC
 
 export async function exportArenaComparison(rows: readonly ArenaCell[], view: ArenaComparisonView) {
   await downloadWorkbook(arenaComparisonWorkbook(rows, view), `voice-arena-comparison-${view}.xlsx`);
+}
+
+export function ttsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string) {
+  const book = new ExcelJS.Workbook();
+  const sheet = addSheet(book, 'TTS review details', [
+    ...identity, 'Role', 'Review type', 'Dimension', 'Panel score (1–5)', 'Recording', 'Window start (s)',
+    'Window end (s)', 'Source', 'Judge rating (1–5)', 'Observation', 'Listening cue', 'File coverage',
+  ], [...identityWidths, 14, 26, 34, 22, 58, 18, 18, 20, 22, 75, 55, 20]);
+  sheet.getColumn(8).numFmt = scoreFormat;
+  sheet.getColumn(13).numFmt = scoreFormat;
+  for (const voice of voices) {
+    const keys = [voice.voice, voice.locale, voice.domain, reportId, voice.role];
+    let hasDetails = false;
+    for (const detail of ttsIssueDetails(voice)) {
+      hasDetails = true;
+      addRow(sheet, [...keys, detail.reviewType, detail.dimension, detail.score, detail.file, detail.start, detail.end,
+        detail.judge, detail.rating, detail.observation, detail.cue,
+        detail.fullyAssessed === undefined ? undefined : detail.fullyAssessed ? 'Fully assessed' : 'Incomplete']);
+    }
+    if (!hasDetails) addRow(sheet, [...keys, 'status', null, null, null, null, null, null, null, ttsIssueStatus(voice)]);
+  }
+  return book;
+}
+
+export async function exportTtsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string) {
+  await downloadWorkbook(ttsDetailsWorkbook(voices, reportId), `tts-review-details-${reportId}.xlsx`);
 }
 
 async function downloadWorkbook(book: ExcelJS.Workbook, filename: string) {

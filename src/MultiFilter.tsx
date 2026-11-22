@@ -40,7 +40,8 @@ export function MultiFilter<T extends string>({ label, all, options, value, onCh
     </button>
     <div id={id} ref={popup} className="multi-filter-popup" popover="auto" role="group" aria-labelledby={`${id}-label`}>
       {searchable && <input type="search" aria-label={`Search ${label.toLowerCase()} options`} placeholder="Search options" value={query} onChange={event => setQuery(event.target.value)} />}
-      <button type="button" className="text-button" disabled={disabled || !value.length} onClick={() => onChange([])}>{all}</button>
+      <button type="button" className="multi-filter-all" aria-pressed={!value.length} disabled={disabled}
+        onClick={() => { if (value.length) onChange([]); }}>{all}</button>
       {visible.map(option => <label key={option.value}><input type="checkbox" checked={value.includes(option.value)} disabled={disabled}
         onChange={event => onChange(event.target.checked ? [...value, option.value] : value.filter(item => item !== option.value))} />{option.label}</label>)}
       {!visible.length && <p role="status">No matching options.</p>}

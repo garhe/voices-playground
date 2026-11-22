@@ -10,13 +10,17 @@ import { studioLocaleLabel } from '../shared/studioVoices';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
 import { resultLocale } from './scriptGenerationProgress';
 import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
+import { ScriptTags } from './ScriptTags';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Unexpected script generation error.';
 const defaultStyleTags = DEFAULT_EXPRESSION_TAG_LISTS.styles.join(', ');
 const defaultSoundTags = DEFAULT_EXPRESSION_TAG_LISTS.sounds.join(', ');
 const parseTagNames = (draft: string) => draft.split(/[,\n]/).map(name => name.trim()).filter(Boolean)
   .map(name => name.replace(/^\[([^\[\]]+)\]$/, '$1'));
-export const DEFAULT_SCRIPT_LOCALES = ['en-US', 'fr-FR', 'zh-HK', 'zh-CN', 'vi-VN'] as const;
+export const DEFAULT_SCRIPT_LOCALES = [
+  'en-US', 'fr-FR', 'zh-HK', 'zh-CN', 'vi-VN', 'fil-PH', 'de-DE', 'id-ID', 'it-IT', 'ja-JP',
+  'ko-KR', 'ms-MY', 'es-MX', 'th-TH', 'tr-TR',
+] as const;
 const CUSTOMER_SERVICE_SCENARIOS = `### Task
 Write realistic agent-only calls in the target language.
 
@@ -79,6 +83,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const [soundTags, setSoundTags] = useState(defaultSoundTags);
   const tagLists = expressionTagListsSchema.safeParse({ styles: parseTagNames(styleTags), sounds: parseTagNames(soundTags) });
   const [prompt, setPrompt] = useState(DEFAULT_SCRIPT_BRIEF);
+  const [workspace, setWorkspace] = useState<'generate' | 'tags'>('generate');
   const [defaultBrief, setDefaultBrief] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<string>(BUILT_IN_BRIEF_TEMPLATES[0].name);
   const [customTemplates, setCustomTemplates] = useState<BriefTemplate[]>([]);
@@ -123,6 +128,20 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const scripts = preview?.results.flatMap(result => 'script' in result ? [result.script] : []) ?? [];
   const previewIsGenerating = preview?.state === 'running' || preview?.state === 'pausing' ||
     preview?.state === 'stopping' || preview?.state === 'cancelling';
+  const runStateLabel = preview
+    ? isRegenerating && regeneration
+      ? `Regenerating ${studioLocaleLabel(regeneration.locale)}`
+      : ({
+        running: preview.retryAt ? 'Waiting to retry' : 'Generating scripts',
+        pausing: 'Pausing after the current requests finish',
+        stopping: 'Stopping active requests',
+        cancelling: 'Cancelling the run',
+        paused: 'Paused',
+        cancelled: 'Run cancelled',
+        completed: 'Run finished',
+        failed: 'Run interrupted',
+      }[preview.state])
+    : undefined;
   const textRequest = runStatus?.textRequest;
   const failedLocales = preview?.results.filter(result => 'error' in result && result.retryAfterMs === undefined).length ?? 0;
   const options = catalog.filter(option => option.label.toLowerCase().includes(localeSearch.trim().toLowerCase()));
@@ -295,6 +314,22 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
 
   return <section className="script-generation" aria-label="Script Generation">
     <div className="page-title"><h1>Script Generation</h1></div>
+    <div className="button-row" role="group" aria-label="Script Generation workspace">
+      <button type="button" className={workspace === 'generate' ? 'primary' : 'secondary'} aria-pressed={workspace === 'generate'}
+        onClick={() => setWorkspace('generate')}>Generate scripts</button>
+      <button type="button" className={workspace === 'tags' ? 'primary' : 'secondary'} aria-pressed={workspace === 'tags'}
+        onClick={() => setWorkspace('tags')}>Script tags</button>
+    </div>
+    <div className="script-tag-workspace" hidden={workspace !== 'tags'}>
+      <ScriptTags request={request} tagLists={tagLists.success ? tagLists.data : undefined}
+        styleTags={styleTags} soundTags={soundTags}
+        tagListsError={tagLists.success ? undefined : tagLists.error.issues[0]?.message}
+        onStyleTagsChange={setStyleTags} onSoundTagsChange={setSoundTags}
+        onResetTagLists={() => { setStyleTags(defaultStyleTags); setSoundTags(defaultSoundTags); }}
+        canAdd={!!connected && !!deployment} azureBusy={previewIsGenerating || isRegenerating || !!textRequest || busy === 'improve'}
+        onConfigure={() => onConfigure(connected ? 'azure-text' : 'azure-openai')} />
+    </div>
+    <div className="script-generation" hidden={workspace !== 'generate'}>
     {(!connected || !deployment || !speechConfigured) && <div className="callout azure-settings-prompt">
       <span>Complete these Azure settings to generate scripts.</span>
       <div className="settings-shortcuts">
@@ -416,16 +451,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         {!runStatus && !statusError && <p role="status">Checking generation status…</p>}
         {runStatus?.textBusy && <p role="status">{textRequest?.cancelling ? 'Cancelling Azure text request…' :
           textRequest?.kind === 'improve-brief' ? 'Improving the brief with Azure…' : 'Another Azure text request is running.'}</p>}
-        {preview && <p role="status">{{
-          running: preview.retryAt ? 'Waiting to retry' : 'Generating scripts',
-          pausing: 'Pausing after the current requests finish',
-          stopping: 'Stopping active requests',
-          cancelling: 'Cancelling the run',
-          paused: 'Paused',
-          cancelled: 'Run cancelled',
-          completed: 'Run finished',
-          failed: 'Run interrupted',
-        }[preview.state]} · {scripts.length}/{preview.input.locales.length} generated
+        {preview && <p role="status">{runStateLabel} · {scripts.length}/{preview.input.locales.length} generated
           {failedLocales > 0 && ` · ${failedLocales} failed`}
           {preview.activeLocales.length > 0 && ` · ${preview.activeLocales.map(locale => studioLocaleLabel(locale)).join(', ')}`}
         </p>}
@@ -483,5 +509,6 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         {result.error && <span className="error-text"> {result.file}: {result.error}</span>}
       </li>)}</ul>}
     </form>
+    </div>
   </section>;
 }

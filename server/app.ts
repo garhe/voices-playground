@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z, ZodError } from 'zod';
 import {
-  clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
+  clipSchema, clipScopeError, referenceWindow, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
   type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs, evaluationWorkspace,
   rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, ARENA_RUBRIC, BUILT_IN_RUBRIC_IDS, DEFAULT_JUDGE_DEPLOYMENTS, type Rubric,
 } from '../shared/domain.js';
@@ -16,9 +16,12 @@ import { testHistory, testMetadataSchema, canManageTest, type BulkTestResult } f
 import { FolderSorting } from './sorting.js';
 import { BatchImport } from './batch.js';
 import { registerStudio } from './studio.js';
+import { speechCheck } from './speechCheck.js';
 import { registerScriptGeneration } from './scriptGeneration.js';
 import { ArenaImport } from './arena.js';
 import { arenaData, arenaReferenceSchema, arenaSettingsSchema } from '../shared/arena.js';
+import { renderShareScorecard } from './shareScorecard.js';
+import { validThemeSelection } from '../src/theme.js';
 
 const uuid = z.string().uuid();
 const CLIP_READ_BATCH_SIZE = 32;
@@ -87,6 +90,7 @@ export async function createApp(options: {
   saveRetryDelayMs?: number;
   scriptDeployment?: string; scriptFetch?: typeof fetch;
   evaluate?: typeof judgeAudio; testConnection?: typeof testRealtimeConnection; speechFetch?: typeof fetch; port?: number;
+  verifySpeech?: (clip: StoredClip, pcm: Buffer, locale: string, windowed: boolean, signal: AbortSignal) => Promise<NonNullable<StoredClip['speechCheck']>>;
 }) {
   const store = new Store(options.dataDir);
   await store.init();
@@ -210,13 +214,14 @@ export async function createApp(options: {
     } finally { dispatching = false; }
   }
   function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips' | 'autoRetry'>, enqueue: boolean): Job {
+    const clips = input.clips.map(({ speechCheck: _speechCheck, ...clip }) => clip);
     return {
-      ...input, id: randomUUID(), createdAt: new Date().toISOString(), status: enqueue ? 'queued' : 'running',
+      ...input, clips, id: randomUUID(), createdAt: new Date().toISOString(), status: enqueue ? 'queued' : 'running',
       profile: { ...input.profile, rubric: input.profile.rubric ?? structuredClone(DEFAULT_RUBRIC) },
       rubric: RUBRIC_VERSION,
       autoRetry: input.autoRetry ?? true,
       collectVoiceDescriptors: true,
-      results: input.clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
+      results: clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
   }
   const firstQueueOrder = () => Math.min(0, ...waiting.map(queued => queued.queueOrder ?? 0)) - 1;
@@ -261,6 +266,16 @@ export async function createApp(options: {
   const studio = await registerStudio(app, store, options.speechFetch);
   registerScriptGeneration(app, { connection, store, studio, defaultDeployment: options.scriptDeployment, fetchText: options.scriptFetch });
   app.get('/api/arena', async (_req, res) => res.json(arenaData(await store.jobs())));
+  app.get('/api/arena/share-scorecard', async (req, res) => {
+    const theme = z.string().refine(validThemeSelection, 'Unknown workspace theme.').optional().parse(req.query.theme);
+    const { cells } = arenaData(await store.jobs());
+    if (!cells.length) {
+      res.status(409).json({ error: 'No fully assessed Arena results are available to share.' });
+      return;
+    }
+    const html = await renderShareScorecard(cells, theme);
+    res.attachment('index.html').type('html').send(html);
+  });
   app.get('/api/arena/settings', async (_req, res) => res.json(
     await store.exists('arena-settings.json') ? await store.read('arena-settings.json') : await store.settings(),
   ));
@@ -504,6 +519,7 @@ export async function createApp(options: {
         byClip.set(result.clipId, byJudge);
       }
       const batchCheckpoints = job.clips.length > 200;
+      const speechChecks = new Map<string, Promise<void>>();
       let completedSinceSave = 0;
       let lastSave = Date.now();
       let checkpoint: Promise<void> | undefined;
@@ -512,6 +528,35 @@ export async function createApp(options: {
         failure ??= { error };
         controller.abort();
       }
+      function checkSpeech(clip: StoredClip, pcm: Buffer): Promise<void> {
+        const arena = job.arena;
+        if (!arena || job.profile.arenaSpeechCheck !== true) return Promise.resolve();
+        let pending = speechChecks.get(clip.id);
+        if (!pending) {
+          pending = (async () => {
+            let key = '';
+            try {
+              const windowed = !!referenceWindow(clip, job.clips);
+              if (options.verifySpeech) {
+                clip.speechCheck = await options.verifySpeech(clip, pcm, arena.locale, windowed, controller.signal);
+              } else {
+                const credentials = studio.verificationCredentials();
+                key = credentials.key;
+                clip.speechCheck = await speechCheck(
+                  credentials, pcm, arena.locale, clip.referenceScript, windowed, controller.signal, options.speechFetch,
+                );
+              }
+            } catch (error) {
+              if (controller.signal.aborted) return;
+              const detail = connection.redact(error);
+              clip.speechCheck = { status: 'failed', error: key ? detail.replaceAll(key, '[REDACTED]') : detail };
+              console.error(`Speech check failed for clip ${clip.id}: ${clip.speechCheck.error}`);
+            }
+          })();
+          speechChecks.set(clip.id, pending);
+        }
+        return pending;
+      }
       async function scoreJudge(clip: StoredClip, judge: Job['judges'][number], result: JudgeResult, pcm: Buffer) {
         if (controller.signal.aborted) { result.status = 'cancelled'; return; }
         result.status = 'running'; delete result.error; delete result.responseFormat;
@@ -519,8 +564,11 @@ export async function createApp(options: {
         if (!batchCheckpoints) await saveEvaluation(job);
         if (controller.signal.aborted) { result.status = 'cancelled'; return; }
         try {
+          await checkSpeech(clip, pcm);
+          if (controller.signal.aborted) { result.status = 'cancelled'; return; }
           const output = await evaluate({
             ...credentials, judge, pcm, role: clip.role,
+            ...(job.arena && clip.referenceScript ? { referenceScript: clip.referenceScript, referenceWindow: referenceWindow(clip, job.clips) } : {}),
             collectVoiceDescriptors: job.collectVoiceDescriptors === true,
             profile: { ...job.profile, language: resolveLanguageHint(clip.language, job.profile.language) }, signal: controller.signal,
           });
@@ -701,6 +749,13 @@ export async function createApp(options: {
           input.profile.language !== arena.locale || input.profile.targetMarket !== arena.locale ||
           clips.some(clip => clip.language !== arena.locale)))
         throw new Error('Arena requires TTS single-speaker evaluation with the script locale as language/accent for all audio.');
+      if (input.arena) {
+        const references = arenaImport.referenceScripts(input.arena, clips);
+        for (const clip of clips) {
+          const text = references.get(clip.id);
+          if (text) clip.referenceScript = text; else delete clip.referenceScript;
+        }
+      }
       // Recheck after asynchronous reads so two requests cannot start concurrent runs.
       if (!input.enqueue && (active || dispatching || queuedWrites || waiting.length)) {
         res.status(409).json({ error: 'Another evaluation is running or queued. Add this test to the queue instead.' }); return;

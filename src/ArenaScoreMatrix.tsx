@@ -3,10 +3,14 @@ import type { ArenaCell } from '../shared/arena';
 import type { Job } from '../shared/domain';
 import { useTableSort } from './TableSort';
 
-export function ArenaScoreMatrix({ domain, cells, locales, load, onInspect, busy }: {
+export function ArenaScoreMatrix({ domain, cells, locales, load, onInspect, busy,
+  externalUrl = import.meta.env?.VITE_ARENA_EXTERNAL_SCORECARD_URL }: {
   domain: string; cells: ArenaCell[]; locales: string[]; load: (id: string) => Promise<Job>;
-  onInspect: (cell: ArenaCell) => void; busy: boolean;
+  onInspect: (cell: ArenaCell) => void; busy: boolean; externalUrl?: string;
 }) {
+  const configuredUrl = externalUrl?.trim();
+  const parsedUrl = configuredUrl?.startsWith('https://') ? URL.parse(configuredUrl) : null;
+  const shareUrl = parsedUrl?.protocol === 'https:' && !parsedUrl.username && !parsedUrl.password ? parsedUrl.href : undefined;
   const sort = useTableSort({ key: 'voice', direction: 'ascending' });
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
@@ -33,9 +37,15 @@ export function ArenaScoreMatrix({ domain, cells, locales, load, onInspect, busy
     }
   }
   return <section className="card arena-card" aria-label={`Arena matrix: ${domain}`}>
-    <div className="section-with-action"><h2>{domain}</h2>
-      <button type="button" className="secondary" disabled={!cells.length || exporting}
-        onClick={() => void exportScorecard()}>{exporting ? 'Preparing Excel…' : 'Export to Excel'}</button>
+    <div className="section-with-action arena-matrix-heading"><h2>{domain}</h2>
+      <div className="arena-matrix-actions">
+        {shareUrl ? <a className="secondary" href={shareUrl} target="_blank" rel="noopener noreferrer"
+          title="Open the published scorecard in a new tab">Share External</a>
+          : <button type="button" className="secondary" disabled
+            title={configuredUrl ? 'The configured scorecard URL must be an HTTPS URL without credentials.' : 'No public scorecard URL is configured.'}>Share External</button>}
+        <button type="button" className="secondary" disabled={!cells.length || exporting}
+          onClick={() => void exportScorecard()}>{exporting ? 'Preparing Excel…' : 'Export to Excel'}</button>
+      </div>
     </div>
     {exportError && <p role="alert" className="error-text">Excel export failed: {exportError}</p>}
     {new Set(cells.map(cell => cell.comparison)).size > 1 && <p role="status" className="hint">These results use different panels, rubrics or test guides and may not be directly comparable. Inspect the source reports before ranking them.</p>}

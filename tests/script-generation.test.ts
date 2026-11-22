@@ -157,7 +157,10 @@ test('a default brief persists verbatim and can be replaced without modifying na
 });
 
 test('script style follows an explicit brief label or the opening description', () => {
-  assert.deepEqual(DEFAULT_SCRIPT_LOCALES, ['en-US', 'fr-FR', 'zh-HK', 'zh-CN', 'vi-VN']);
+  assert.deepEqual(DEFAULT_SCRIPT_LOCALES, [
+    'en-US', 'fr-FR', 'zh-HK', 'zh-CN', 'vi-VN', 'fil-PH', 'de-DE', 'id-ID', 'it-IT', 'ja-JP',
+    'ko-KR', 'ms-MY', 'es-MX', 'th-TH', 'tr-TR',
+  ]);
   assert.equal(extractScriptStyle(DEFAULT_SCRIPT_BRIEF), 'Customer_Services');
   assert.equal(extractScriptStyle('Write a call.\r\n**Tone:** Warm and direct'), 'Warm and direct');
   assert.equal(extractScriptStyle('### Task\nWrite a friendly hotel support call. Confirm the date.'), 'friendly hotel support call');
@@ -329,6 +332,11 @@ test('generates on the configured Azure connection, reports failed locales, and 
     const body = JSON.parse(String(init?.body));
     assert.equal(body.response_format.type, 'json_object');
     const spec = JSON.parse(body.messages[1].content);
+    if ('sentences' in spec) {
+      assert.deepEqual(spec.sentences, ['Bonjour !', 'Merci.']);
+      assert.ok(spec.allowedStyles.includes('appreciative'));
+      return Response.json({ choices: [{ finish_reason: 'stop', message: { content: '{"styles":["happy","appreciative"]}' } }] });
+    }
     if (!('locale' in spec)) {
       if (spec.contentBrief === 'Cancel this brief improvement.') {
         improvementStarted = true;
@@ -415,6 +423,15 @@ test('generates on the configured Azure connection, reports failed locales, and 
   const post = (route: string, value: unknown, method = 'POST') => fetch(`${url}${route}`, {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
   });
+  const tagSource = { type: 'text', name: 'fr-FR_sample.txt', text: 'fr-FR_00001\tBonjour ! Merci.\r\n' };
+  assert.equal((await post('tags', { source: tagSource, action: 'add' })).status, 400);
+  const tagged = await post('tags', { source: tagSource, action: 'add', consent: true });
+  assert.equal(tagged.status, 200);
+  const taggedText = 'fr-FR_00001\t[happy] Bonjour ! [appreciative] Merci.\r\n';
+  assert.deepEqual(await tagged.json(), [{ source: tagSource.name, name: 'fr-FR_sample_Tags.txt', text: taggedText }]);
+  const untagged = await post('tags', { source: { ...tagSource, text: taggedText }, action: 'remove' });
+  assert.equal(untagged.status, 200);
+  assert.deepEqual(await untagged.json(), [{ source: tagSource.name, name: 'fr-FR_sample_NoTags.txt', text: tagSource.text }]);
 
   assert.deepEqual(await (await fetch(`${url}settings`)).json(), { deployment: 'text-default', source: 'environment', secureStorageAvailable });
   const catalog: { value: string; label: string }[] = await (await fetch(`${url}locales`)).json();

@@ -3,7 +3,7 @@ import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { arenaImportSchema, arenaUploadSchema, arenaScript, type ArenaPreview, type ArenaReference, type ArenaMetadata, type ArenaTest, type ArenaScriptSource } from '../shared/arena.js';
 import { supportedAudio } from '../shared/batch.js';
-import type { StoredClip, VoiceGender } from '../shared/domain.js';
+import { contiguousWindows, type StoredClip, type VoiceGender } from '../shared/domain.js';
 import { BatchImport } from './batch.js';
 import { realDirectory } from './localDirectory.js';
 import { decodeStudioText, parseStudioScript } from './studioScripts.js';
@@ -14,6 +14,7 @@ export class ArenaImport {
   private preview?: ArenaPreview;
   private sources = new Map<string, Source>();
   private layout?: 'voices' | 'tests';
+  private references = new Map<string, string>();
 
   private async scriptMatcher(source: ArenaScriptSource) {
     const inputs = 'scriptsDirectory' in source ? [await realDirectory(source.scriptsDirectory)] : source.scriptPaths;
@@ -44,8 +45,8 @@ export class ArenaImport {
         await addScript(absolute);
       }
     }
-    const scripts = new Map<string, ArenaMetadata>();
-    const clipScripts = new Map<string, ArenaMetadata[]>();
+    const scripts = new Map<string, { metadata: ArenaMetadata; text: string }>();
+    const clipScripts = new Map<string, { metadata: ArenaMetadata; text: string }[]>();
     for (const file of scriptFiles.values()) {
       const name = path.basename(file);
       const metadata = arenaScript(name);
@@ -54,10 +55,10 @@ export class ArenaImport {
       if (script.locale && Intl.getCanonicalLocales(script.locale)[0] !== metadata.locale)
         throw new Error(`Script header locale must match its filename: ${name}`);
       if (scripts.has(stem.toLowerCase())) throw new Error(`Duplicate script name: ${name}`);
-      scripts.set(stem.toLowerCase(), metadata);
+      scripts.set(stem.toLowerCase(), { metadata, text: script.clips.map(clip => clip.text).join('\n') });
       for (const clip of script.clips) {
         const key = clip.name.toLowerCase();
-        clipScripts.set(key, [...(clipScripts.get(key) ?? []), metadata]);
+        clipScripts.set(key, [...(clipScripts.get(key) ?? []), { metadata, text: clip.text }]);
       }
     }
     if (!scripts.size) throw new Error('Provide a directory containing <locale>_<domain>.txt test scripts, or at least one .txt file path.');
@@ -69,11 +70,18 @@ export class ArenaImport {
     };
   }
 
+  private remember(file: { path: string; voice: string }, text: string) {
+    this.references.set(JSON.stringify([file.path, file.voice]), text);
+  }
+
   async planUploads(input: unknown): Promise<ArenaPreview> {
     this.preview = undefined;
+    this.references.clear();
     const request = arenaUploadSchema.parse(input);
     const match = await this.scriptMatcher(request);
-    const metadata = request.files.map(file => match(path.basename(file.path)));
+    const matches = request.files.map(file => match(path.basename(file.path)));
+    request.files.forEach((file, index) => this.remember(file, matches[index].text));
+    const metadata = matches.map(item => item.metadata);
     const first = metadata[0];
     if (metadata.some(item => item.locale !== first.locale || item.domain !== first.domain))
       throw new Error('Single evaluation requires one script language/domain. Use Batch evaluation for multiple language/domain tests.');
@@ -88,12 +96,14 @@ export class ArenaImport {
 
   async plan(input: unknown): Promise<ArenaPreview> {
     this.preview = undefined;
+    this.references.clear();
     const request = arenaImportSchema.parse(input);
     const root = await realDirectory('directory' in request ? request.directory : request.directories[0]);
     const matchScript = await this.scriptMatcher(request);
     const response: ArenaPreview = { directory: root, token: randomUUID(), tests: [], ignoredFiles: 0 };
     const groups = new Map<string, ArenaTest>();
-    const add = (file: { id: string; path: string; voice: string; size: number }, metadata: ArenaMetadata, gender: VoiceGender = 'Unspecified') => {
+    const add = (file: { id: string; path: string; voice: string; size: number }, match: { metadata: ArenaMetadata; text: string }, gender: VoiceGender = 'Unspecified') => {
+      const { metadata } = match;
       const name = `${metadata.locale}_${metadata.domain}`;
       let group = groups.get(name);
       if (!group) {
@@ -108,6 +118,7 @@ export class ArenaImport {
       if (!label) group.voiceLabels!.push({ voice, gender });
       if (!group.genders.includes(gender)) group.genders.push(gender);
       group.files.push({ ...file, voice });
+      this.remember({ path: file.path, voice }, match.text);
       if (!file.size || file.size > 100 * 1024 * 1024) group.errors.push(`Audio must be nonempty and no larger than 100 MB: ${file.path}`);
     };
     this.sources.clear();
@@ -172,6 +183,25 @@ export class ArenaImport {
     if (expected.size !== actual.size || [...expected].some(key => !actual.has(key)))
       throw new Error('Arena audio must match every file and voice in the preview.');
     return structuredClone(test.arena);
+  }
+
+  /**
+   * Script text per clip ID. Clips receive the script when they start near 0 s and form back-to-back windows.
+   * This check does not independently verify the original file's end.
+   */
+  referenceScripts(reference: ArenaReference, clips: StoredClip[]): Map<string, string> {
+    this.metadata(reference, clips);
+    const perFile = new Map<string, StoredClip[]>();
+    for (const clip of clips) {
+      const key = JSON.stringify([clip.file, clip.voice]);
+      perFile.set(key, [...(perFile.get(key) ?? []), clip]);
+    }
+    const result = new Map<string, string>();
+    for (const [key, group] of perFile) {
+      const text = this.references.get(key);
+      if (text && text.length <= 20000 && contiguousWindows(group)) for (const clip of group) result.set(clip.id, text);
+    }
+    return result;
   }
 
   labels(reference: ArenaReference) {

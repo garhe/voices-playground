@@ -613,12 +613,13 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   assert.doesNotMatch(retryHtml, /Eligible after/);
   assert.match(html, /Running: Current/); assert.match(html, /Pause queue/);
   assert.match(html, /Cancel queued test Next/); assert.match(html, /<details>/);
-  assert.match(html, /<ol><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
+  assert.match(html, /<ol aria-label="Waiting tests in queue order" tabindex="0"><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
   assert.match(render({ paused: true, waiting: [{ id: 'next', name: 'Next' }], error: 'Connection unavailable' }), /Start queue/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.test-queue-row\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;align-items:center;gap:12px\}/);
   assert.match(css, /\.test-queue-row>span\{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis\}/);
   assert.match(css, /\.test-queue-row>button\{justify-self:end\}/);
+  assert.doesNotMatch(css, /\.arena-status-queue|\.arena-queued-tests|\.arena-queue-item/);
 });
 
 test('workspace queue hides other jobs and unclassified names while retaining global controls', () => {

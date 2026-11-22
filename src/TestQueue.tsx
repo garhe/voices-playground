@@ -36,8 +36,10 @@ export function TestQueue({ state, busy, onPause, onStart, onCancel, workspace, 
     {!!visible.active?.autoRetryCount && <p role="status">Automatic retry {visible.active.autoRetryCount} · No attempt limit</p>}
     {state.paused && <p className="hint">The current test can finish; waiting tests will not start. After a server restart, start the saved queue explicitly.</p>}
     {!!visible.waiting.length && <details><summary>Waiting tests ({visible.waiting.length})</summary>
-      <ol>{visible.waiting.map(test => <li key={test.id}><div className="test-queue-row"><span title={test.name}>{test.retry ? 'Retry: ' : ''}{test.name}</span>
-        <button className="text-button danger" disabled={busy} aria-label={`Cancel queued test ${test.name}`} onClick={() => onCancel(test.id)}>Cancel</button></div>
+      <ol aria-label="Waiting tests in queue order" tabIndex={0}>{visible.waiting.map(test => <li key={test.id}>
+        <div className="test-queue-row"><span title={test.name}>{test.retry ? 'Retry: ' : ''}{test.name}</span>
+          <button className="text-button danger" disabled={busy} aria-label={`Cancel queued test ${test.name}`}
+            onClick={() => onCancel(test.id)}>Cancel</button></div>
         {!!test.autoRetryCount && <small>Automatic retry {test.autoRetryCount} · Later tests wait until this test finishes</small>}
       </li>)}</ol>
     </details>}

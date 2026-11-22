@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, link, lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, link, lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,9 +9,13 @@ import { z } from 'zod';
 import { protectKey } from './credentials.js';
 import { Store } from './store.js';
 import { decodeStudioText, parseStudioScript } from './studioScripts.js';
+import { localScriptPaths } from './scriptSourcePaths.js';
 import { realDirectory } from './localDirectory.js';
 import { STUDIO_SYNTHESIS_BATCH_SIZE, studioClipSchema, studioLocaleCodeSchema, studioPlanRequestSchema, studioVoiceSchema, validStudioName, type StudioCell, type StudioPlan, type StudioPlanRequest, type StudioRun, type StudioVoice } from '../shared/studio.js';
 import { studioVoiceLocales } from '../shared/studioVoices.js';
+import { studioExpressionMarkup, studioSsml } from '../shared/studioSsml.js';
+
+export { studioSsml };
 
 type SpeechCredentials = { region: string; endpoint: string; key: string };
 const speechConnectionSchema = z.object({
@@ -21,7 +25,6 @@ const speechConnectionSchema = z.object({
 }).strict();
 const storedSchema = z.object({ region: z.string(), endpoint: z.string(), protectedKey: z.string() }).strict();
 const localePattern = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})+$/;
-const escapeXml = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Unexpected synthesis error.';
 const missing = (error: unknown) => error instanceof Error && 'code' in error && error.code === 'ENOENT';
 const windowsVoiceName = (name: string) => name.replace(/[%<>:"/\\|?*\x00-\x1f]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
@@ -45,14 +48,6 @@ const savedRunSchema = z.object({
     ]).optional(),
   })).min(1),
 });
-
-export function studioSsml(voice: StudioVoice, text: string, locale: string, rate: number, pitch: number): string {
-  const signed = (value: number) => `${value >= 0 ? '+' : ''}${value}%`;
-  const attributes = [rate ? `rate="${signed(rate)}"` : '', pitch ? `pitch="${signed(pitch)}"` : ''].filter(Boolean).join(' ');
-  const contentText = attributes ? `<prosody ${attributes}>${escapeXml(text)}</prosody>` : escapeXml(text);
-  const content = locale ? `<lang xml:lang="${escapeXml(locale)}">${contentText}</lang>` : contentText;
-  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${escapeXml(voice.Locale)}"><voice name="${escapeXml(voice.ShortName)}">${content}</voice></speak>`;
-}
 
 function speechBase(credentials: SpeechCredentials): string {
   if (!credentials.endpoint) return `https://${credentials.region}.tts.speech.microsoft.com`;
@@ -147,6 +142,9 @@ export class AzureVoicesStudio {
     speechBase(value);
     return { ...value };
   }
+  verificationCredentials(): SpeechCredentials {
+    return this.current();
+  }
   status() {
     const env = { region: process.env.AZURE_SPEECH_REGION ?? '', endpoint: process.env.AZURE_SPEECH_ENDPOINT ?? '', key: process.env.AZURE_SPEECH_KEY ?? '' };
     const value = this.saved ?? env;
@@ -196,27 +194,11 @@ export class AzureVoicesStudio {
   }
   async readPaths(paths: string[]) {
     const results: { name: string; script?: ReturnType<typeof parseStudioScript>['script']; warnings?: string[]; error?: string }[] = [];
-    async function read(file: string) {
+    for await (const entry of localScriptPaths(paths)) {
+      if (entry.error) { results.push(entry); continue; }
       try {
-        const stat = await lstat(file);
-        if (!stat.isFile() || stat.isSymbolicLink() || (await realpath(file)).toLowerCase() !== path.resolve(file).toLowerCase())
-          throw new Error('Files reached through links or junctions are not supported.');
-        if (!/\.txt$/i.test(file) || stat.size > 2_000_000) throw new Error('Choose a .txt file of at most 2 MB.');
-        results.push({ name: file, ...parseStudioScript(path.basename(file), decodeStudioText(await readFile(file))) });
-      } catch (error) { results.push({ name: file, error: errorText(error) }); }
-    }
-    for (const raw of paths) {
-      const input = raw.trim().replace(/^"(.*)"$/, '$1');
-      try {
-        if (!path.isAbsolute(input) || path.parse(path.resolve(input)).root === path.resolve(input)) throw new Error('Enter an absolute file or folder path, not a drive root.');
-        const stat = await lstat(input);
-        if (stat.isSymbolicLink() || (await realpath(input)).toLowerCase() !== path.resolve(input).toLowerCase()) throw new Error('Links and junctions are not supported.');
-        if (stat.isDirectory()) {
-          const names = (await readdir(input)).filter(name => /\.txt$/i.test(name)).sort();
-          if (!names.length) throw new Error('No .txt files found in this folder.');
-          for (const name of names) await read(path.join(input, name));
-        } else await read(input);
-      } catch (error) { results.push({ name: input, error: errorText(error) }); }
+        results.push({ name: entry.name, ...parseStudioScript(path.basename(entry.name), decodeStudioText(await readFile(entry.name))) });
+      } catch (error) { results.push({ name: entry.name, error: errorText(error) }); }
     }
     return results;
   }
@@ -312,6 +294,19 @@ export class AzureVoicesStudio {
     }
     const pending = cells.filter(cell => cell.status === 'queued');
     const warnings = ['Text units count UTF-16 code units and exclude SSML markup and retries; Azure may bill more than this preview.'];
+    const unlistedStyles = new Set<string>();
+    const soundTags = new Set<string>();
+    let characters = 0;
+    for (const cell of pending) {
+      const expression = studioExpressionMarkup(cell.voice, cell.text);
+      characters += expression.spokenText.length;
+      for (const tag of expression.unlistedStyles) unlistedStyles.add(tag);
+      for (const tag of expression.soundTags) soundTags.add(tag);
+    }
+    if (unlistedStyles.size)
+      warnings.push(`Style tags not advertised by one or more selected voices are still included in SSML; Azure may ignore unsupported styles: ${[...unlistedStyles].join(', ')}.`);
+    if (soundTags.size)
+      warnings.push(`Sound tags are removed from speech but do not generate sound effects: ${[...soundTags].join(', ')}.`);
     const fallbackCount = cells.filter(cell => cell.languageFallback).length;
     if (fallbackCount) warnings.push(`${fallbackCount} clip/voice pairs have no SSML language tag because the filename locale was missing or unsupported. See the Language column for each reason.`);
     if (cells.some(cell => !cell.locale)) warnings.push('Auto relies on the selected voice to interpret the language; single-language voices generally use their primary locale. Azure does not return the detected language, so Auto folders have no language metadata for Voice Scoring.');
@@ -320,9 +315,9 @@ export class AzureVoicesStudio {
     if (cells.some(cell => cell.status === 'skipped')) warnings.push('Existing WAV files are skipped by path and format only; their text and settings are not verified.');
     if (request.runName && request.useExisting) warnings.push('Reusing the run folder replaces its run.json and manifest.csv with the new run report.');
     if (/onedrive/i.test(parent)) warnings.push('The output directory appears to be in OneDrive; sync can slow or lock file writes.');
-    if (pending.reduce((n, cell) => n + cell.text.length, 0) > 100_000) warnings.push('This run exceeds 100,000 characters and may incur significant charges.');
+    if (characters > 100_000) warnings.push('This run exceeds 100,000 characters and may incur significant charges.');
     if (this.catalogGeneration !== generation) throw new Error('The voice catalog or connection changed while preparing the preview. Preview again.');
-    const plan: StudioPlan = { token: randomUUID(), expiresAt: new Date(Date.now() + 600_000).toISOString(), output, byLocale, calls: pending.length, characters: pending.reduce((n, cell) => n + cell.text.length, 0), cells, warnings };
+    const plan: StudioPlan = { token: randomUUID(), expiresAt: new Date(Date.now() + 600_000).toISOString(), output, byLocale, calls: pending.length, characters, cells, warnings };
     this.plans.set(plan.token, { plan: structuredClone(plan), request, credentials, fingerprints });
     return plan;
   }

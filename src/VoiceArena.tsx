@@ -7,13 +7,16 @@ import { ArenaTestStatus } from './ArenaTestStatus';
 import { ArenaDimensionComparison, type ArenaComparisonView } from './ArenaDimensionComparison';
 import { MultiFilter } from './MultiFilter';
 import { ArenaScoreMatrix } from './ArenaScoreMatrix';
-import { filterValues, matchesFilter } from '../shared/filterSelection';
+import { ArenaDetailFilters } from './ArenaDetailFilters';
+import { matchesFilter } from '../shared/filterSelection';
 import { arenaDetailKey, arenaDetailMatches, arenaDetailOptions, arenaDetailSelectionForCell, type ArenaDetailSelection } from './arenaDetails';
+import { validThemeSelection } from './theme';
 
 type Request = <T>(url: string, body?: unknown, method?: string, signal?: AbortSignal) => Promise<T>;
 export type ArenaPage = 'new' | 'scorecard' | 'details';
-export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, onPageChange, newTest, queue, onDelete, deletedIds }: {
+export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, onPageChange, newTest, queue, queuePanel, onDelete, deletedIds }: {
   active: boolean; page?: ArenaPage; request: Request; busy: boolean; queue?: TestQueueState;
+  queuePanel?: ReactNode;
   onOpen: (id: string) => void; onPageChange?: (page: ArenaPage) => void; newTest?: ReactNode;
   onDelete: (reports: Pick<ArenaReport, 'id' | 'name'>[]) => void;
   deletedIds: ReadonlySet<string>;
@@ -24,6 +27,8 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
     reports: loadedData?.reports.filter(report => !deletedIds.has(report.id)) ?? [],
   };
   const [pollError, setPollError] = useState('');
+  const [shareExporting, setShareExporting] = useState(false);
+  const [shareError, setShareError] = useState('');
   const [domainFilter, setDomain] = useState<string[]>([]);
   const [language, setLanguage] = useState<string[]>([]);
   const [model, setModel] = useState<string[]>([]);
@@ -81,7 +86,12 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
   const scoreDomains = domains.filter(domain => matchesFilter(domainFilter, selected => selected === domain));
   const scoreOptions = arenaDetailOptions(data.cells.filter(cell => scoreDomains.includes(cell.domain)));
   const detailDomainCells = data.cells.filter(cell => matchesFilter(selectedDetail.domain, domain => cell.domain === domain));
-  const detailOptions = arenaDetailOptions(detailDomainCells);
+  const detailDomainReports = data.reports.filter(report => matchesFilter(selectedDetail.domain, domain => report.arena.domain === domain));
+  const detailOptions = arenaDetailOptions([
+    ...detailDomainCells,
+    ...detailDomainReports.flatMap(report => (report.filterVoices ?? []).map(voice => ({ ...voice, locale: report.arena.locale }))),
+  ]);
+  detailOptions.locales = [...new Set([...detailOptions.locales, ...detailDomainReports.map(report => report.arena.locale)])].sort();
   const matchingCells = arenaDetailMatches(detailDomainCells, selectedDetail);
   const comparisonCells = matchingCells.map(cell => {
     if (cell.dimensionScores) return cell;
@@ -102,6 +112,33 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
       error => setDetailError(error instanceof Error ? error.message : 'Unexpected report error.'), 3000);
   }, [active, page, detailJobId, request]);
   const scoreCells = arenaDetailMatches(data.cells, { domain: domainFilter, locale: language, model, gender, voice: [] });
+  async function exportShareScorecard() {
+    setShareExporting(true);
+    setShareError('');
+    try {
+      const root = document.documentElement;
+      const theme = root.dataset.themeMix ? `mix:${root.dataset.themeMix}` : root.style.getPropertyValue('--theme-color').trim();
+      const query = validThemeSelection(theme) ? `?${new URLSearchParams({ theme })}` : '';
+      const response = await fetch(`/api/arena/share-scorecard${query}`, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) {
+        if (response.status === 409) throw new Error('No fully assessed Arena results are available to share.');
+        throw new Error(`Scorecard export failed (HTTP ${response.status}).`);
+      }
+      if (!response.headers.get('content-disposition')?.startsWith('attachment;')) {
+        throw new Error('The server did not return a scorecard download. Restart Voices Playground and try again.');
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'index.html';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setShareError(error instanceof Error ? error.message : 'Could not export the shareable scorecard.');
+    } finally {
+      setShareExporting(false);
+    }
+  }
   return <section className="voice-arena" aria-label="Voice Arena">
     <div hidden={page !== 'new'}>
       <div className="page-title"><h1>New Arena test</h1></div>
@@ -111,6 +148,15 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
       <div className="page-title"><h1>Arena scorecard</h1></div>
       <p>Compare each voice and model across content languages, dialects and accents. Each domain has its own matrix.</p>
       {pollError && <p role="alert" className="error-text">Matrix refresh failed: {pollError}. Retrying automatically.</p>}
+      <section className="card arena-card" aria-label="Share scorecard">
+        <div className="section-with-action">
+          <h2>Share scorecard</h2>
+          <button type="button" className="secondary" disabled={shareExporting || !data.cells.length}
+            onClick={() => void exportShareScorecard()}>{shareExporting ? 'Preparing scorecard…' : 'Export shareable scorecard'}</button>
+        </div>
+        <p className="hint">Download a standalone HTML snapshot of all fully assessed scorecard results, regardless of current filters. Only aggregate scores, filter labels and broad issue categories are included. Review the file before publishing it publicly.</p>
+        {shareError && <p role="alert" className="error-text">{shareError}</p>}
+      </section>
       <section className="card arena-card" aria-label="Arena scorecard filters">
         <h2>Voice × language / accent</h2>
         <p className="hint">Overall preference, 1–5. Each cell uses the newest fully assessed test for that voice/model, locale and domain. Incomplete newer tests do not replace a score. Click a score to inspect voice/locale details.</p>
@@ -137,15 +183,13 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
       <div className="page-title"><h1>Arena detailed reports</h1></div>
       {pollError && <p role="alert" className="error-text">Report list refresh failed: {pollError}. Retrying automatically.</p>}
       {page === 'details' && <ArenaTestStatus reports={data.reports} reportsLoaded={!!loadedData} queue={queue}
+        queuePanel={queuePanel} selection={selectedDetail}
+        filters={<ArenaDetailFilters selection={selectedDetail} domains={domains} options={detailOptions} onChange={updateDetail} />}
         activity={activity?.id === activeTestId ? activity : undefined} busy={busy} onOpen={onOpen} onDelete={onDelete} />}
       <section className="card arena-card" aria-label="Detailed report selection">
         <h2>Voice and locale breakdown</h2>
         <div className="field-row filter-bar">
-          <MultiFilter label="Report domain" all="All domains" value={filterValues(selectedDetail.domain)} options={domains} onChange={domain => updateDetail({ domain })} />
-          <MultiFilter label="Voice" all="All voices" value={filterValues(selectedDetail.voice)} options={detailOptions.voices} onChange={voice => updateDetail({ voice })} searchable />
-          <MultiFilter label="Model" all="All models" value={filterValues(selectedDetail.model)} options={detailOptions.models} onChange={model => updateDetail({ model })} />
-          <MultiFilter label="Script locale" all="All script locales" value={filterValues(selectedDetail.locale)} options={detailOptions.locales} onChange={locale => updateDetail({ locale })} searchable />
-          <MultiFilter label="Gender" all="All genders" value={filterValues(selectedDetail.gender)} options={detailOptions.genders} onChange={gender => updateDetail({ gender })} />
+          <ArenaDetailFilters selection={selectedDetail} domains={domains} options={detailOptions} onChange={updateDetail} />
           <label>Comparison view<select value={comparisonView} onChange={event => setComparisonView(event.target.value === 'descriptors' ? 'descriptors' : 'scores')}>
             <option value="scores">Scores</option><option value="descriptors">Voice descriptors</option>
           </select></label>

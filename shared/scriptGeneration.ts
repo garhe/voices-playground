@@ -96,7 +96,7 @@ export type ScriptGenerationRun = {
 export type ScriptGenerationStatus = {
   run?: ScriptGenerationRun;
   textBusy: boolean;
-  textRequest?: { id: string; kind: 'improve-brief' | 'generate'; cancelling: boolean };
+  textRequest?: { id: string; kind: 'improve-brief' | 'generate' | 'script-tags'; cancelling: boolean };
 };
 
 export const scriptExportSchema = z.object({

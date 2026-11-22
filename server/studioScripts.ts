@@ -1,11 +1,5 @@
 import { validStudioName, type StudioScript } from '../shared/studio.js';
-
-export function decodeStudioText(bytes: Uint8Array): string {
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le', { fatal: true }).decode(bytes.subarray(2));
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be', { fatal: true }).decode(bytes.subarray(2));
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, ''); }
-  catch { throw new Error('Unsupported encoding. Save the file as UTF-8 or UTF-16 with a BOM.'); }
-}
+export { decodeStudioText } from '../shared/scriptSources.js';
 
 export function parseStudioScript(name: string, text: string): { script: StudioScript; warnings: string[] } {
   name = name.trim().replace(/\.txt$/i, '');

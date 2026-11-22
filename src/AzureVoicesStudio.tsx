@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { MAX_STUDIO_VOICES, STUDIO_SYNTHESIS_BATCH_SIZE, type StudioCell, type StudioPlan, type StudioRun, type StudioScript, type StudioSpeechStatus, type StudioVoice } from '../shared/studio';
 import { sortStudioVoices, studioLocaleLabel, studioLocaleOptions, studioVoiceLocales, studioVoiceMatches, studioVoiceModel, type StudioVoiceSort } from '../shared/studioVoices';
+import { studioExpressionMarkup, studioSsml } from '../shared/studioSsml';
 import { useTableSort } from './TableSort';
 import { MultiFilter } from './MultiFilter';
+import { decodeStudioText, MAX_SCRIPT_FILE_BYTES, scriptInputs, scriptPaths, type ScriptInput } from '../shared/scriptSources';
 
 type ParseResult = { script: StudioScript; warnings: string[] };
 type PathResult = { name: string; script?: StudioScript; warnings?: string[]; error?: string };
-type ScriptInput = 'text' | 'upload' | 'folder' | 'paths';
-
-const scriptInputs: { id: ScriptInput; label: string }[] = [
-  { id: 'text', label: 'Paste text' },
-  { id: 'upload', label: 'Upload .txt' },
-  { id: 'folder', label: 'Folder of .txt files' },
-  { id: 'paths', label: 'List of file paths' },
-];
 const catalogColumns: { key: StudioVoiceSort['key']; label: string }[] = [
   { key: 'voice', label: 'Voice' },
   { key: 'language', label: 'Primary language' },
@@ -38,6 +32,7 @@ function StudioCellPages({ cells, mode, language, children }: {
     {sorting.header('clip', 'Clip', 'ascending', reset)}{sorting.header('voice', 'Voice', 'ascending', reset)}
     {sorting.header('language', 'Language', 'ascending', reset)}{sorting.header('status', mode === 'preview' ? 'Action' : 'Status', 'ascending', reset)}
     {mode === 'results' && <th scope="col">Audio</th>}
+    {mode === 'preview' && <th scope="col">SSML</th>}
     {sorting.header('path', mode === 'preview' ? 'Output path' : 'Path / error', 'ascending', reset)}
   </>;
   const pageSize = 100;
@@ -52,6 +47,22 @@ function StudioCellPages({ cells, mode, language, children }: {
     </div>}
   </>;
 }
+
+function StudioSsmlPreview({ cell }: { cell: StudioCell }) {
+  const [open, setOpen] = useState(false);
+  const conversion = open ? studioExpressionMarkup(cell.voice, cell.text) : undefined;
+  return <details className="studio-ssml-preview" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Show SSML</summary>
+    {conversion?.unlistedStyles.length ? <p className="hint">
+      These styles are not advertised by this voice but are included in the SSML: {conversion.unlistedStyles.join(', ')}. Azure may ignore unsupported styles.
+    </p> : null}
+    {conversion?.soundTags.length ? <p className="hint">
+      Sound-effect tags are omitted and do not produce audio effects: {conversion.soundTags.join(', ')}.
+    </p> : null}
+    {open && <pre><code>{studioSsml(cell.voice, cell.text, cell.locale, 0, 0)}</code></pre>}
+  </details>;
+}
+
 async function request<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(url, { method, headers: body === undefined ? undefined : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   if (!response.ok) {
@@ -59,15 +70,6 @@ async function request<T>(url: string, method = 'GET', body?: unknown): Promise<
     throw new Error(data.error || `Request failed (HTTP ${response.status}).`);
   }
   return response.json();
-}
-
-function decodeFile(bytes: ArrayBuffer): string {
-  const data = new Uint8Array(bytes);
-  try {
-    if (data[0] === 0xff && data[1] === 0xfe) return new TextDecoder('utf-16le', { fatal: true }).decode(data.subarray(2));
-    if (data[0] === 0xfe && data[1] === 0xff) return new TextDecoder('utf-16be', { fatal: true }).decode(data.subarray(2));
-    return new TextDecoder('utf-8', { fatal: true }).decode(data).replace(/^\uFEFF/, '');
-  } catch { throw new Error('Unsupported encoding. Save the file as UTF-8 or UTF-16 with a BOM.'); }
 }
 
 export function AzureVoicesStudio({ status, onConfigure, onError: setError }: {
@@ -274,8 +276,8 @@ export function AzureVoicesStudio({ status, onConfigure, onError: setError }: {
             const results: ParseResult[] = []; const failures: string[] = [];
             for (const file of files) {
               try {
-                if (!/\.txt$/i.test(file.name) || file.size > 2_000_000) throw new Error('Choose a .txt file of at most 2 MB.');
-                results.push(await request<ParseResult>('/api/studio/scripts', 'POST', { name: file.name, text: decodeFile(await file.arrayBuffer()) }));
+                if (!/\.txt$/i.test(file.name) || file.size > MAX_SCRIPT_FILE_BYTES) throw new Error('Choose a .txt file of at most 2 MB.');
+                results.push(await request<ParseResult>('/api/studio/scripts', 'POST', { name: file.name, text: decodeStudioText(new Uint8Array(await file.arrayBuffer())) }));
               } catch (problem) { failures.push(`${file.name}: ${problem instanceof Error ? problem.message : 'Could not read file.'}`); }
             }
             addParsed(results); setScriptErrors(failures);
@@ -299,7 +301,7 @@ export function AzureVoicesStudio({ status, onConfigure, onError: setError }: {
           placeholder={'"C:\\Scripts\\greeting.txt"\n"C:\\Scripts\\closing.txt"'} onChange={event => setPaths(event.target.value)} /></label>
         <p className="hint">Paste one path per line, with or without Windows “Copy as path” quotes. Folder paths are also accepted.</p>
         <button className="secondary" disabled={locked || !paths.trim()} onClick={() => void performScript(() =>
-          addPaths(paths.split(/\r\n|\n|\r/).map(line => line.trim()).filter(Boolean)))}>Add file paths</button>
+          addPaths(scriptPaths(paths)))}>Add file paths</button>
       </div>}
       {scriptNotes.map((note, index) => <p className="hint" role="status" key={`${index}-${note}`}>{note}</p>)}
       {!!scriptErrors.length && <ul className="studio-source-errors error-text" role="alert">{scriptErrors.map((message, index) => <li key={`${index}-${message}`}>{message}</li>)}</ul>}
@@ -373,10 +375,11 @@ export function AzureVoicesStudio({ status, onConfigure, onError: setError }: {
         <p>Output folder: <strong>{plan.byLocale}</strong></p>
         {plan.calls > STUDIO_SYNTHESIS_BATCH_SIZE && <p className="hint">Studio will process {Math.ceil(plan.calls / STUDIO_SYNTHESIS_BATCH_SIZE).toLocaleString()} batches automatically without creating numbered folders.</p>}
         {plan.warnings.map(warning => <p className="error-text" key={warning}>{warning}</p>)}
-        <p className="hint">Each row is one script-line × voice cell. Preview expires at {new Date(plan.expiresAt).toLocaleTimeString()}.</p>
+        <p className="hint">Each row is one script-line × voice cell. Expand <strong>Show SSML</strong> in a row to inspect what will be sent to Azure. Preview expires at {new Date(plan.expiresAt).toLocaleTimeString()}.</p>
         <StudioCellPages key={plan.token} cells={plan.cells} mode="preview" language={cellLanguage}>{(cells, headings) =>
           <div className="table-scroll studio-matrix" tabIndex={0} role="region" aria-label="Synthesis preview"><table><thead><tr>{headings}</tr></thead>
-            <tbody>{cells.map(cell => <tr key={cell.id}><td>{cell.script} / {cell.clip}</td><td>{cell.voice.ShortName}</td><td>{cellLanguage(cell)}</td><td>{cell.status === 'skipped' ? 'Skip existing' : 'Synthesize'}</td><td>{cell.path}</td></tr>)}</tbody></table></div>}
+           <tbody>{cells.map(cell => <tr key={cell.id}><td>{cell.script} / {cell.clip}</td><td>{cell.voice.ShortName}</td><td>{cellLanguage(cell)}</td>
+             <td>{cell.status === 'skipped' ? 'Skip existing' : 'Synthesize'}</td><td><StudioSsmlPreview cell={cell} /></td><td>{cell.path}</td></tr>)}</tbody></table></div>}
         </StudioCellPages>
       </div>}
       <div className="button-row" role="group" aria-label="Synthesis controls">

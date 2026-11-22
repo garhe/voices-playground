@@ -1108,10 +1108,6 @@ test('result views include the complete evaluation without a judge-language filt
 
 test('report surfaces and exports expose saved improvement cases without inventing legacy defects', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} \/>/);
-  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} dimension=\{d\.dimension\} \/>/);
-  assert.match(source, /<ImprovementEvidence judge=\{evidence\} profile=\{job\.profile\} \/>/);
-  assert.match(source, /This does not establish a perfect performance/);
   assert.match(source, /row\('dimension_improvement', note/);
   assert.match(source, /DEFECTS & IMPROVEMENTS:/);
   assert.match(source, /notes\(d\.improvements\)/);
@@ -1126,14 +1122,13 @@ test('setup disclosures share compact vertical spacing and inset markers with al
   assert.match(css, /\.setup-section\[open\] > summary::before \{ transform: rotate\(90deg\); \}/);
 });
 
-test('recent evaluation statuses are compact muted text and dimension ratings have tighter spacing', () => {
+test('recent evaluation statuses are compact muted text', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.history-item \.status-badge \{[^}]*padding: 0; border: 0; background: none; font-size: \.6875rem;[^}]*text-transform: none; letter-spacing: 0;/);
   assert.match(css, /\.history-item \.status-badge\.completed \{ color: #b8cdbf; \}/);
   assert.match(css, /\.history-item \.status-badge\.running \{ color: #d6c69d; \}/);
   assert.match(css, /\.history-item \.status-badge\.queued \{ color: #d2b2b2; \}/);
   assert.match(css, /\.history-item:enabled:hover \{ background: #ffffff14;/);
-  assert.match(css, /\.voice-matrix \.matrix-ratings li \{ margin: 3px 0; font-size: var\(--text-caption\); line-height: 1.5; \}/);
 });
 
 test('all UI retry actions use the queue without blocking behind unrelated tests or falling back to legacy resume', () => {

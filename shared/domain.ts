@@ -65,12 +65,20 @@ export const DEFAULT_RUBRIC: Rubric = {
     weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
   })),
 };
-export const ARENA_TEST_GUIDE = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones; no reference script is provided, so do not judge omissions or whether content matches the script), **naturalness** (human-like prosody without robotic, flat or glitchy delivery) and **emotion & speaking style** (an appropriate, consistent, warm and professional emotional tone for the domain). Give detailed, audio-specific reasons for every score.';
-const arenaDimensionGuidance: Record<Dimension, string> = {
+export const ARENA_TEST_GUIDE = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones) and **script fidelity** against the supplied reference script (any words, names, numbers or phrases skipped, cut off, substituted or repeated, any speech added that is not in the script, and bracketed style tags read aloud), **naturalness** (human-like prosody without robotic, flat or glitchy delivery, and **one consistent speaker identity**: no point within an utterance where the voice changes timbre, pitch register, apparent age or gender, or accent so that it sounds like a different person) and **emotion & speaking style** (an appropriate, consistent, warm and professional tone for the domain, and each segment conveying the style its bracketed tag requests, e.g. [reassuring] or [hesitant]). Give detailed, audio-specific reasons for every score and say where each issue occurs.';
+/** Unedited revision-1 Arena guide, kept so saved profiles that still use it can move to the current built-in guide. */
+export const LEGACY_ARENA_TEST_GUIDE_V1 = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones; no reference script is provided, so do not judge omissions or whether content matches the script), **naturalness** (human-like prosody without robotic, flat or glitchy delivery) and **emotion & speaking style** (an appropriate, consistent, warm and professional emotional tone for the domain). Give detailed, audio-specific reasons for every score.';
+const LEGACY_ARENA_V1_TEXT = {
+  instructions: 'Evaluate synthetic TTS voices for a cross-language Voice Arena. Assess audible vocal delivery, not script quality or task completion. Examine each audio thoroughly for accent fit to the target locale, pronunciation accuracy, naturalness, and emotion & speaking style, as well as pace and audio quality. For pronunciation and accent, cite the specific kinds of errors heard (wrong tones, mispronounced, garbled or wrong-language words, foreign-accent carry-over) and where they occur. No reference script is provided, so do not assess omissions or script fidelity. Give detailed, audio-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
   naturalness: 'How human and native-like the synthetic voice sounds: believable prosody and intonation contours, natural sentence-level melody, smooth joins between words and phrases, and no robotic, monotone, sing-song, metallic or glitchy delivery. Penalize audible TTS tells such as unnatural pitch resets, abrupt phrase endings or mechanical rhythm. Do not rate whether the wording sounds logical or helpful.',
-  articulation: 'Pronunciation accuracy for the target locale, judged from audio alone: words heard should be pronounced correctly, including lexical tones for tonal languages (e.g. Mandarin, Cantonese, Vietnamese), word stress, and vowel and consonant sounds. Penalize audibly mispronounced, slurred, swallowed or garbled words, tones or stress that are implausible for the heard word, and words spoken in the wrong language or locale. No reference script is provided: do not penalize suspected omissions, and do not judge whether names, numbers, dates or abbreviations match the script. Flag them only when the spoken form is itself audibly malformed. Never guess.',
-  pace: 'Comfortable vocal rhythm, phrasing, breath flow and pauses without a rushed or dragging feel, including natural pauses at punctuation and phrase boundaries. Slower is not automatically better.',
   expressiveness: 'Emotion and speaking style: audible emotional color, warmth, empathy and engagement that suit the script domain (for customer service, a friendly, calm, attentive and professional tone), appropriate emphasis and intonation on key information, and a consistent persona across the whole audio with no sudden or unmotivated shifts. Calm, controlled delivery can be excellent; exaggerated or flat emotion is a defect. Empathetic wording alone earns no credit.',
+  articulation: 'Pronunciation accuracy for the target locale, judged from audio alone: words heard should be pronounced correctly, including lexical tones for tonal languages (e.g. Mandarin, Cantonese, Vietnamese), word stress, and vowel and consonant sounds. Penalize audibly mispronounced, slurred, swallowed or garbled words, tones or stress that are implausible for the heard word, and words spoken in the wrong language or locale. No reference script is provided: do not penalize suspected omissions, and do not judge whether names, numbers, dates or abbreviations match the script. Flag them only when the spoken form is itself audibly malformed. Never guess.',
+};
+const arenaDimensionGuidance: Record<Dimension, string> = {
+  naturalness: 'How human and native-like the synthetic voice sounds: believable prosody and intonation contours, natural sentence-level melody, smooth joins between words and phrases, and no robotic, monotone, sing-song, metallic or glitchy delivery. Penalize audible TTS tells such as unnatural pitch resets, abrupt phrase endings or mechanical rhythm. Speaker identity must stay consistent: penalize heavily any point within an utterance where the voice audibly changes timbre, voice quality, pitch register, apparent age or gender, or accent so that part of the audio sounds like a different speaker, even if each part sounds natural on its own. Intended emotional or emphatic changes in the same recognizable voice are not identity changes. Do not rate whether the wording sounds logical or helpful.',
+  articulation: 'Pronunciation accuracy and script fidelity for the target locale. Words should be pronounced correctly, including lexical tones for tonal languages (e.g. Mandarin, Cantonese, Vietnamese), word stress, and vowel and consonant sounds. Penalize audibly mispronounced, slurred, swallowed or garbled words, tones or stress that are implausible for the intended word, and words spoken in the wrong language or locale. When a reference script is supplied, compare the audio with it and penalize every mismatch: skipped, truncated or cut-off words, phrases or sentences; substituted or misread words, names, numbers, dates or abbreviations; repeated words; speech that is not in the script; and bracketed style or expression tags (for example [reassuring]) read aloud. Accept any natural, correct spoken form of numbers, dates, times, currencies, phone numbers, abbreviations and symbols in the target locale, and disfluencies such as "uh" or "um" that are written in the script. Without a reference script, judge from audio alone and do not penalize suspected omissions. Never guess.',
+  pace: 'Comfortable vocal rhythm, phrasing, breath flow and pauses without a rushed or dragging feel, including natural pauses at punctuation and phrase boundaries. Slower is not automatically better.',
+  expressiveness: 'Emotion and speaking style: audible emotional color, warmth, empathy and engagement that suit the script domain (for customer service, a friendly, calm, attentive and professional tone), appropriate emphasis and intonation on key information, and a consistent persona across the whole audio with no sudden or unmotivated shifts. When the reference script contains bracketed style or expression tags (for example [reassuring], [hesitant], [curious]), each tag sets the expected style for the text that follows it until the next tag: check that every tagged segment audibly conveys that style, including the change between styles, and penalize segments that sound neutral, wrong or exaggerated for their tag. Calm, controlled delivery can be excellent; exaggerated or flat emotion is a defect. Empathetic wording alone earns no credit.',
   contextFit: 'Fit of the audible voice persona, tone and emotional delivery to the supplied Arena test guide and the script domain. Ignore script, factual, logical, business-process and task-completion requirements.',
   accentFit: 'Accent fit to the target locale given as a BCP-47 code (for example en-US = General American English, fr-FR = France French, zh-CN = Mainland Mandarin, zh-TW = Taiwan Mandarin, zh-HK = Hong Kong Cantonese, yue-CN = Cantonese as spoken in Guangdong, vi-VN = Vietnamese). Rate how closely pronunciation, vowel/consonant patterns, tones, stress and intonation match a standard, widely accepted professional accent of that locale, and penalize audible foreign-accent carry-over or a different regional variant (for example Mainland features in zh-TW). Judge listener suitability, not nationality, ethnicity or identity, and do not penalize the same mismatch again in other dimensions.',
   audioQuality: 'Audible fidelity, noise, distortion, clipping, dropouts and synthetic artifacts such as buzz, phasing, clicks or vocoder noise, not the quality of the spoken content.',
@@ -79,12 +87,22 @@ const arenaLabels: Partial<Record<Dimension, string>> = {
   articulation: 'Pronunciation accuracy', expressiveness: 'Emotion & speaking style', accentFit: 'Accent fit',
 };
 export const ARENA_RUBRIC: Rubric = {
-  id: 'voice-arena-tts-v1', revision: 1, name: 'Voice Arena TTS rubric',
-  instructions: 'Evaluate synthetic TTS voices for a cross-language Voice Arena. Assess audible vocal delivery, not script quality or task completion. Examine each audio thoroughly for accent fit to the target locale, pronunciation accuracy, naturalness, and emotion & speaking style, as well as pace and audio quality. For pronunciation and accent, cite the specific kinds of errors heard (wrong tones, mispronounced, garbled or wrong-language words, foreign-accent carry-over) and where they occur. No reference script is provided, so do not assess omissions or script fidelity. Give detailed, audio-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
+  id: 'voice-arena-tts-v1', revision: 2, name: 'Voice Arena TTS rubric',
+  instructions: 'Evaluate synthetic TTS voices for a cross-language Voice Arena. Assess audible vocal delivery, not script quality or task completion. Examine each audio thoroughly for accent fit to the target locale, pronunciation accuracy and script fidelity, naturalness including a consistent speaker identity, and emotion & speaking style, as well as pace and audio quality. For pronunciation and accent, cite the specific kinds of errors heard (wrong tones, mispronounced, garbled or wrong-language words, foreign-accent carry-over) and where they occur. When a reference script is supplied, report every skipped, truncated, substituted, repeated or added word or phrase and any bracketed style tag read aloud, and judge under emotion & speaking style whether each tagged segment conveys the style its tag requests. Report any point where the voice changes so that it sounds like a different speaker within one utterance. Give detailed, audio-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
   testGuides: { conversation: DEFAULT_TEST_GUIDE, single: ARENA_TEST_GUIDE, both: BOTH_SPEAKERS_TEST_GUIDE },
   dimensions: dimensions.map(id => ({
     id, label: arenaLabels[id] ?? labels[id], description: arenaDimensionGuidance[id], enabled: true,
     weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
+  })),
+};
+/** Unedited revision 1 of the built-in Arena rubric, for migrating saved profiles. */
+export const LEGACY_ARENA_RUBRIC_V1: Rubric = {
+  ...ARENA_RUBRIC, revision: 1, instructions: LEGACY_ARENA_V1_TEXT.instructions,
+  testGuides: { ...ARENA_RUBRIC.testGuides, single: LEGACY_ARENA_TEST_GUIDE_V1 },
+  dimensions: ARENA_RUBRIC.dimensions.map(dimension => ({
+    ...dimension, weights: { ...dimension.weights },
+    description: dimension.id === 'naturalness' || dimension.id === 'articulation' || dimension.id === 'expressiveness'
+      ? LEGACY_ARENA_V1_TEXT[dimension.id] : dimension.description,
   })),
 };
 export const BUILT_IN_RUBRIC_IDS: readonly string[] = [DEFAULT_RUBRIC.id, ARENA_RUBRIC.id];
@@ -112,6 +130,7 @@ export const profileSchema = z.object({
   scope: z.enum(['single', 'agent', 'customer', 'both']),
   speakerMode: z.enum(['automatic', 'manual']).optional(),
   singleSpeakerFallback: z.boolean().optional(),
+  arenaSpeechCheck: z.boolean().optional(),
   target: z.string().trim().min(1, 'Enter a target vocal style or test guide before starting the evaluation.').max(1500),
   language: languageHintSchema,
   targetMarket: z.string().trim().max(500).optional(),
@@ -163,7 +182,36 @@ export function rolesForScope(scope: Profile['scope']): Clip['role'][] {
   return scope === 'single' ? ['speaker'] : scope === 'both' ? ['agent', 'customer'] : [scope];
 }
 export type Technical = { peakDb: number | null; rmsDb: number | null; clippingPercent: number; quietPercent: number; seconds: number };
-export type StoredClip = Clip & { technical: Technical };
+/**
+ * referenceScript is the Arena script text the TTS voice was asked to speak for the whole audio file. It is set only when
+ * the file's clips cover it from 0 s in back-to-back windows; a long file's windows all carry the full script.
+ */
+export type SpeechCheck = {
+  status: 'completed';
+  text: { status: 'compared'; missing: number; added: number; substituted: number; firstReferenceWord: number | null }
+    | { status: 'unavailable'; reason: string };
+  speaker: { status: 'possible_change' | 'no_change_detected' | 'unavailable'; segments: number };
+} | { status: 'failed'; error: string };
+export type StoredClip = Clip & { technical: Technical; referenceScript?: string; speechCheck?: SpeechCheck };
+/** Position of one window within a long audio file that shares a single reference script (index is 1-based). */
+export type ReferenceWindow = { index: number; count: number; start: number; end: number };
+const WINDOW_GAP_SECONDS = 0.05;
+/** True when clips start near 0 s and are back-to-back; this does not verify the file's end. */
+export function contiguousWindows(clips: readonly Clip[]): boolean {
+  if (!clips.length) return false;
+  const sorted = [...clips].sort((a, b) => a.start - b.start);
+  if (sorted[0].start > WINDOW_GAP_SECONDS) return false;
+  return sorted.every((clip, i) => i === 0 ||
+    (clip.file === sorted[0].file && clip.voice === sorted[0].voice && clip.role === sorted[0].role &&
+      Math.abs(clip.start - sorted[i - 1].end) <= WINDOW_GAP_SECONDS));
+}
+/** Window position of a clip among the clips of its file, or undefined when the file is a single window. */
+export function referenceWindow(clip: Clip, clips: readonly Clip[]): ReferenceWindow | undefined {
+  const siblings = clips.filter(other => other.file === clip.file && other.voice === clip.voice && other.role === clip.role)
+    .sort((a, b) => a.start - b.start);
+  if (siblings.length < 2 || !contiguousWindows(siblings)) return undefined;
+  return { index: siblings.findIndex(other => other.id === clip.id) + 1, count: siblings.length, start: clip.start, end: clip.end };
+}
 export type DraftClip = StoredClip & { include: boolean };
 export function clipScopeError(scope: Profile['scope'], clips: Clip[]): string | undefined {
   const wanted = rolesForScope(scope);
@@ -504,12 +552,14 @@ export function unassessedInputs(job: Job) {
   });
 }
 
+export const ISSUE_RATING_THRESHOLD = 4;
+
 export type VoiceEvidence = {
   voice: string; role: string; files: number; eligibleFiles: number; score: number | null; weightedScore: number | null;
   judges: {
     judgeId: string; scoredFiles: number; score: number | null; weightedScore: number | null;
     gaps: EvidenceNote[]; observations: EvidenceNote[]; limitations: EvidenceNote[];
-    dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[]; improvements: EvidenceNote[] }[];
+    dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[]; improvements: EvidenceNote[]; issues: EvidenceNote[] }[];
   }[];
 };
 export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
@@ -525,6 +575,7 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
     return [...grouped].map(([text, files]) => ({ text, files: [...files].sort() }))
       .sort((a, b) => b.files.length - a.files.length || a.text.localeCompare(b.text, 'en'));
   };
+  const active = activeDimensions(job.profile);
   return summarize(job).map(summary => {
     const clips = job.clips.filter(c => c.voice === summary.voice && c.role === summary.role);
     return {
@@ -538,24 +589,32 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
           gaps: notes(entries.flatMap(({ clip, result }) => assessmentGaps(result, job.profile, clip.role).map(text => ({ text, file: clip.file })))),
           observations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.observations.map(text => ({ text, file: clip.file })))),
           limitations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.limitations.map(text => ({ text, file: clip.file })))),
-          dimensions: dimensions.filter(d => activeDimensions(job.profile).includes(d) || d === 'audioQuality').map(d => ({
-            dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && !activeDimensions(job.profile).includes(d),
-            improvements: notes(completed.flatMap(({ clip, result }) => {
-              const a = result!.assessment!;
-              if (!activeDimensions(job.profile).includes(d) || !hasScoringSpeaker(a, job.profile, clip.role) ||
-                  eligibleScore(a, job.profile) === null) return [];
-              return (a.rehearsalCases ?? []).filter(item => item.dimension === d && a.scores[d] !== null).map(item => ({
-                file: clip.file,
-                text: `Excerpt ${clip.start}-${clip.end}s. Find: ${item.cue} | Defect heard / listener impact: ${item.observation} | Improve: ${item.direction} | Pass check: ${item.check}`,
-              }));
-            })),
-            reasons: notes(completed.flatMap(({ clip, result }) => {
+          dimensions: dimensions.filter(d => active.includes(d) || d === 'audioQuality').map(d => {
+            const diagnostic = !active.includes(d);
+            const reasons: { text: string; file: string }[] = [], improvements: typeof reasons = [];
+            const fixes: typeof reasons = [], lowRatings: typeof reasons = [];
+            for (const { clip, result } of completed) {
               const a = result!.assessment!;
               const identified = hasScoringSpeaker(a, job.profile, clip.role);
-              return identified && a.scores[d] !== null && (d === 'audioQuality' || (a.assessable && a.languageSupported))
-                ? [{ text: a.reasons[d], file: clip.file }] : [];
-            })),
-          })),
+              const rating = a.scores[d];
+              const hasReason = identified && rating !== null && (d === 'audioQuality' || (a.assessable && a.languageSupported));
+              if (hasReason) reasons.push({ text: a.reasons[d], file: clip.file });
+              if (diagnostic) continue;
+              const cases = (a.rehearsalCases ?? []).filter(item => item.dimension === d);
+              const canRehearse = cases.length > 0 && identified && rating !== null && eligibleScore(a, job.profile) !== null;
+              if (cases.length && (canRehearse || job.profile.stage === 'tts')) {
+                const caseNotes = cases.map(item => ({
+                  file: clip.file,
+                  text: `Excerpt ${clip.start}-${clip.end}s. Find: ${item.cue} | Defect heard / listener impact: ${item.observation} | Improve: ${item.direction} | Pass check: ${item.check}`,
+                }));
+                if (canRehearse) improvements.push(...caseNotes);
+                fixes.push(...caseNotes);
+              } else if (hasReason && rating < ISSUE_RATING_THRESHOLD) {
+                lowRatings.push({ text: `${rating}/5: ${a.reasons[d].trim() || 'Low rating; no reason saved.'}`, file: clip.file });
+              }
+            }
+            return { dimension: d, score: own.dimensions[d], diagnostic, reasons: notes(reasons), improvements: notes(improvements), issues: [...notes(fixes), ...notes(lowRatings)] };
+          }),
         };
       }),
     };

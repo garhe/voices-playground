@@ -12,9 +12,10 @@ import { createApp } from '../server/app.js';
 import { wav } from '../server/audio.js';
 import { BatchImport } from '../server/batch.js';
 import { decodeStudioText, parseStudioScript } from '../server/studioScripts.js';
-import { AzureVoicesStudio, studioSsml } from '../server/studio.js';
+import { AzureVoicesStudio } from '../server/studio.js';
 import { Store } from '../server/store.js';
 import { AzureVoicesStudio as Studio } from '../src/AzureVoicesStudio.js';
+import { studioExpressionMarkup, studioSsml } from '../shared/studioSsml.js';
 import type { StudioPlan, StudioRun, StudioScript, StudioVoice } from '../shared/studio.js';
 import { sortStudioVoices, studioLocaleOptions, studioVoiceLocales, studioVoiceMatches, studioVoiceModel, type StudioVoiceFilters } from '../shared/studioVoices.js';
 
@@ -312,6 +313,20 @@ test('SSML escapes text and voice names, and only wraps explicitly selected lang
   assert.match(manual, /A &amp; &lt;B&gt; &quot;quoted&quot;/);
   assert.match(manual, /rate="-5%" pitch="\+2%"/);
   assert.doesNotMatch(studioSsml(voices[0], 'Hello', '', 0, 0), /<lang |<prosody /);
+});
+
+test('SSML emits listed and unlisted style tags and removes sound annotations from speech', () => {
+  const voice = { ...standardVoice, StyleList: ['calm'] };
+  const text = '[calm] Hello. [angry] Stop. [laughter] See [reference]. [custom_mood] Again.';
+  const ssml = studioSsml(voice, text, '', -5, 0);
+  assert.match(ssml, /<mstts:express-as style="calm"><prosody rate="-5%"> Hello\. <\/prosody><\/mstts:express-as>/);
+  assert.match(ssml, /<mstts:express-as style="angry"><prosody rate="-5%"> Stop\./);
+  assert.match(ssml, /<mstts:express-as style="custom_mood"><prosody rate="-5%"> Again\./);
+  assert.doesNotMatch(ssml, /\[(calm|angry|laughter|custom_mood)\]/);
+  assert.match(ssml, /See \[reference\]\./);
+  const conversion = studioExpressionMarkup(voice, text);
+  assert.deepEqual(conversion.unlistedStyles, ['angry', 'custom_mood']);
+  assert.deepEqual(conversion.soundTags, ['laughter']);
 });
 
 test('Speech credentials are DPAPI-protected and restored without exposing the key', { skip: process.platform !== 'win32' }, async () => {

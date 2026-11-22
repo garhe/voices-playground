@@ -1,4 +1,4 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE, ARENA_RUBRIC, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE, ARENA_RUBRIC, LEGACY_ARENA_RUBRIC_V1, LEGACY_ARENA_TEST_GUIDE_V1, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
@@ -43,7 +43,7 @@ export function defaultTestGuide(profile: Pick<Profile, 'scope' | 'rubric'>): st
 }
 function usesDefaultGuide(profile: Profile): boolean {
   const guides = profileRubric(profile).testGuides;
-  return !profile.target.trim() || [guides.single, guides.conversation, guides.both, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE].includes(profile.target);
+  return !profile.target.trim() || [guides.single, guides.conversation, guides.both, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, ARENA_TEST_GUIDE, LEGACY_ARENA_TEST_GUIDE_V1].includes(profile.target);
 }
 export function withSpeakerScope(profile: Profile, scope: Profile['scope']): Profile {
   const next = { ...profile, scope };
@@ -55,10 +55,12 @@ export function withRubric(profile: Profile, rubric: Rubric): Profile {
   })) } };
   return usesDefaultGuide(profile) ? { ...next, target: defaultTestGuide(next) } : next;
 }
-/** Moves a saved Arena profile still on the unedited general default rubric to the Arena TTS rubric. */
+/** Moves a saved Arena profile still on an unedited general default rubric or older built-in Arena rubric to the current Arena TTS rubric. */
 export function withArenaRubric(profile: Profile): Profile {
   const rubric = profileRubric(profile);
-  return rubric.id === DEFAULT_RUBRIC.id && !rubricHasChanges(rubric, DEFAULT_RUBRIC) ? withRubric(profile, ARENA_RUBRIC) : profile;
+  const updated = (rubric.id === DEFAULT_RUBRIC.id && !rubricHasChanges(rubric, DEFAULT_RUBRIC)) ||
+    (rubric.id === ARENA_RUBRIC.id && !rubricHasChanges(rubric, LEGACY_ARENA_RUBRIC_V1)) ? withRubric(profile, ARENA_RUBRIC) : profile;
+  return { ...updated, arenaSpeechCheck: updated.arenaSpeechCheck ?? true };
 }
 
 export function withTestNameLanguage(profile: Profile, name: string): Profile {
