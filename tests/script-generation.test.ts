@@ -8,10 +8,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/app.js';
-import { bareAirportCodes, continuesAfterQuestion } from '../server/scriptGeneration.js';
+import { bareAirportCodes, continuesAfterQuestion, serviceOpeningIssue } from '../server/scriptGeneration.js';
 import { parseStudioScript } from '../server/studioScripts.js';
 import { expressionTagListsSchema, type ExpressionTagLists } from '../shared/scriptExpressionTags.js';
-import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptGenerationResult, type ScriptGenerationStatus } from '../shared/scriptGeneration.js';
+import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type GeneratedScript, type ScriptGenerationResult, type ScriptGenerationStatus } from '../shared/scriptGeneration.js';
 import { generateScriptPreview, generateScriptsWithRetry, mergeBatchResults, regenerateLocalePreview } from '../src/scriptGenerationProgress.js';
 import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief } from '../src/scriptBriefTemplates.js';
 import { BUILT_IN_BRIEF_TEMPLATES, DEFAULT_SCRIPT_BRIEF, DEFAULT_SCRIPT_LOCALES, extractScriptStyle, ScriptGeneration } from '../src/ScriptGeneration.js';
@@ -27,18 +27,22 @@ test('default content brief keeps tag rules separate and requires hesitations in
   }));
   const prompt = html.match(/Content brief<textarea[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
   assert.ok(prompt);
+  const textareaValue = prompt.replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
   assert.match(html, /<\/textarea><\/label><details[^>]*><summary>Expression tags applied: one style tag per sentence<\/summary>.*<\/details><div class="button-row"><button[^>]*>Improve with AI<\/button>.*New template name/);
   assert.match(html, /Prefix every spoken sentence with exactly 1 emotion\/style tag in square brackets/);
   assert.match(html, /Use \[calm\] at most 4 times per locale/);
   assert.match(html, /Optional sound tags: \[laughter\]/);
   assert.match(html, /Allowed style tags<textarea[^>]*>amazed, amused/);
   assert.match(html, /Optional sound tags<textarea[^>]*>laughter, coughing/);
-  assert.ok(prompt.includes('Use local fillers, such as `um...`, `yep...`, `alright...`, `ah ha...`  in English, `嗯嗯...`, `是...的...`, `这样子...` in Mandarin, `即係...` in Cantonese, `euh...`, `oui...`, `alors...`  in French, or `à...`, `vâng...` in Vietnamese.'));
+  assert.match(textareaValue, /Use local fillers or pauses when the agent is checking something or thinking\. Don't interrupt a clear explanation/);
+  assert.match(prompt, /confirm the details match without reciting their full name, address, or phone number back/);
   assert.match(prompt, /at least 2 hesitations per mini-call\*\* \(at least 8 total\)/);
   assert.match(prompt, /place at least half \*\*in the middle of a sentence\*\*/);
   assert.doesNotMatch(prompt, /expression tags|Use only these style names|\[calm\]/);
   assert.match(html, /Expression tags<select><option value="on" selected="">On<\/option><option value="off">Off<\/option>/);
   assert.match(prompt, /Use at most 1 brief greeting across the calls; focus on solving the problem/);
+  assert.match(textareaValue, /Start EVERY agent reply by acknowledging the customer's request, details, or response before answering, verifying, proposing a fix, or confirming it/);
+  assert.match(textareaValue, /A few natural words are enough.*Don't promise unverified outcomes/);
   const delivery = prompt.match(/\*\*Colloquial Delivery:\*\*([^\r\n]*)/)?.[1];
   assert.ok(delivery);
   assert.match(delivery, /In every locale, use what a local agent would actually say on the phone/);
@@ -55,19 +59,46 @@ test('default content brief keeps tag rules separate and requires hesitations in
   assert.doesNotMatch(html, /<option value="customer_services_tag"/);
   assert.doesNotMatch(prompt, /Do NOT use any square brackets/);
   assert.doesNotMatch(prompt, /4 to 6 total/);
-  assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt }).success, true);
+  assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt: textareaValue }).success, true);
   assert.equal(scriptGenerationSchema.safeParse({ ...brief, speakers: 1, utteranceCount: 16, prompt: DEFAULT_SCRIPT_BRIEF }).success, true);
+});
+
+test('French openings have no special whitelist and repeated phrases are reported together', () => {
+  const line = (opening: string) => ({ text: `[reassuring] ${opening}, je vérifie.` });
+  const french = ['D’accord', 'Oui', 'Merci', 'Très bien', 'Entendu', 'Je vois', 'Bien sûr', 'Parfait',
+    'Exactement', 'Ça marche', 'Tout à fait', 'Pas de souci', 'Je comprends', 'Bien reçu', 'C’est noté', 'Volontiers'];
+  assert.equal(serviceOpeningIssue(french.map(line)), undefined);
+  french[3] = "D'ACCORD";
+  french[6] = 'd’accord';
+  french[8] = 'Parfait';
+  const issue = serviceOpeningIssue(french.map(line)) ?? '';
+  assert.match(issue, /Reply 7 repeats.*replies 1 and 4/);
+  assert.match(issue, /Reply 9 repeats.*reply 8/);
 });
 
 test('the customer service template requests distinct cases within the same four domains', () => {
   for (const { prompt } of BUILT_IN_BRIEF_TEMPLATES) {
     assert.match(prompt, /Call 1 — Telecom[\s\S]*Call 2 — Banking & Finance[\s\S]*Call 3 — Delivery & Logistics[\s\S]*Call 4 — Flight & Hotel Travel/);
     assert.match(prompt, /For each locale and run, vary the incident, cause, and resolution within each domain/);
-    assert.match(prompt, /Vary case-specific nouns \(devices, merchants, parcels, routes\)/);
-    assert.match(prompt, /Don't translate or recycle a script by just swapping names/);
+    assert.match(prompt, /Don't recycle a case by just swapping names, dates, or routes/);
   }
 });
 
+function serviceLines(first: readonly [string, string], second: readonly [string, string], close = ['One moment.', 'Done.', 'Got it.', 'Glad that worked.']): string[] {
+  return [first, second, first, second].flatMap(([help, acknowledge], index) => [
+    `[reassuring] ${help}`, `[reassuring] ${acknowledge}`, `[calm] ${close[index % 2 * 2]}`, `[confident] ${close[index % 2 * 2 + 1]}`,
+  ]);
+}
+
+test('service opening validation enforces frequency, adjacency, and the actual first spoken clause', () => {
+  const line = (opening: string, separator = '，') => ({ text: `[reassuring] ${opening}${separator} details.` });
+  const choices = ['好嘅', '唔該晒', '明白', '可以呀', 'Dạ', 'Em hiểu', 'Merci', 'Bien sûr'];
+  assert.equal(serviceOpeningIssue([...choices, ...choices].map(phrase => line(phrase))), undefined);
+  assert.match(serviceOpeningIssue([line('好嘅'), line('好嘅', '。')]) ?? '', /Reply 2 repeats/);
+  assert.match(serviceOpeningIssue([line('Dạ'), line('Vâng'), line('Ｄạ'), line('Merci'), line('DẠ')]) ?? '', /Reply 5 repeats/);
+  assert.match(serviceOpeningIssue([{ text: '[reassuring] Dạ, vâng, em kiểm tra.' }, line('Dạ')]) ?? '', /Reply 2 repeats/);
+  assert.match(serviceOpeningIssue([{ text: '[reassuring] …Sure, I can check.' }]) ?? '', /short spoken opening/);
+});
 test('both travel scenarios request a complete revised flight itinerary and wait for approval', () => {
   const travel = DEFAULT_SCRIPT_BRIEF.split('Call 4 — Flight & Hotel Travel')[1]?.split('\n\n')[0];
   assert.ok(travel);
@@ -233,7 +264,7 @@ test('generates on the configured Azure connection, reports failed locales, and 
   t.after(() => rm(root, { force: true, recursive: true }));
   const output = path.join(root, 'scripts');
   await mkdir(output);
-  const calls: { model: string; instructions: string; locale: string; speakers: number; style: string; contentBrief: string }[] = [];
+  const calls: { model: string; instructions: string; locale: string; speakers: number; style: string; contentBrief: string; previousScript?: GeneratedScript['utterances'] }[] = [];
   const improvementCalls: { model: string; instructions: string; speakers: number; style: string; contentBrief: string }[] = [];
   const foundryEndpoint = 'https://script-test-responses.services.ai.azure.com/openai/v1/responses';
   const foundryCalls: string[] = [];
@@ -244,11 +275,23 @@ test('generates on the configured Azure connection, reports failed locales, and 
   const podcastBrief = 'Write a short podcast intro. Do not use tags.';
   const narrativeBrief = 'Read a book excerpt. Prefix each sentence with a tag in square brackets.';
   let customOutput = '';
-  const primaryLocales = ['en-US', 'en-GB', 'en-AU', 'en-CA', 'en-NZ', 'en-IN', 'en-IE', 'en-ZA', 'fr-FR', 'fr-CA', 'de-DE'];
+  let cantoneseFailuresThrough = 2;
+  const primaryLocales = ['en-US', 'en-GB', 'en-AU', 'en-CA', 'en-NZ', 'en-IN', 'en-IE', 'en-ZA', 'fr-FR', 'fr-CA', 'de-DE', 'ja-JP', 'zh-HK'];
   let releaseSlowLocale: (() => void) | undefined;
   const slowLocale = new Promise<void>(resolve => { releaseSlowLocale = resolve; });
   let releaseRunLocale: (() => void) | undefined;
   const slowRunLocale = new Promise<void>(resolve => { releaseRunLocale = resolve; });
+  let holdCancelableLocale = true;
+  let abortedRequests = 0;
+  let improvementStarted = false;
+  const waitForAbort = async (signal: AbortSignal) => {
+    await new Promise<void>(resolve => {
+      if (signal.aborted) resolve();
+      else signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    abortedRequests++;
+    signal.throwIfAborted();
+  };
   let catalogCalls = 0;
   const speechFetch: typeof fetch = async input => {
     assert.equal(String(input), 'https://eastus.tts.speech.microsoft.com/cognitiveservices/voices/list');
@@ -287,6 +330,10 @@ test('generates on the configured Azure connection, reports failed locales, and 
     assert.equal(body.response_format.type, 'json_object');
     const spec = JSON.parse(body.messages[1].content);
     if (!('locale' in spec)) {
+      if (spec.contentBrief === 'Cancel this brief improvement.') {
+        improvementStarted = true;
+        await waitForAbort(init!.signal!);
+      }
       improvementCalls.push({ model: body.model, instructions: body.messages[0].content, ...spec });
       const suggestion = spec.contentBrief === 'Return too much.' ? 'a'.repeat(MAX_SCRIPT_BRIEF_LENGTH + 1) : suggestedBrief;
       return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ suggestion }) } }] });
@@ -294,6 +341,7 @@ test('generates on the configured Azure connection, reports failed locales, and 
     calls.push({ model: body.model, instructions: body.messages[0].content, ...spec });
     if (spec.contentBrief === 'Check live progress.' && spec.locale.includes('en-US')) await slowLocale;
     if (spec.contentBrief === 'Check reconnectable run.' && spec.locale.includes('en-US')) await slowRunLocale;
+    if (spec.contentBrief === 'Check stopping active requests.' && spec.locale.includes('en-US') && holdCancelableLocale) await waitForAbort(init!.signal!);
     if (spec.locale.includes('es-MX')) return new Response(null, { status: 429, headers: { 'Retry-After': '8' } });
     const recovering = spec.contentBrief === 'Retry invalid output.';
     if (recovering && spec.locale.includes('en-GB')) return new Response(null, { status: 403 });
@@ -301,12 +349,27 @@ test('generates on the configured Azure connection, reports failed locales, and 
       calls.filter(call => call.contentBrief === spec.contentBrief && call.locale === spec.locale).length === 1);
     const taggedAttempt = calls.filter(call => call.contentBrief === taggedBrief).length;
     const defaultAttempt = calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && call.locale === spec.locale).length;
+    const english = spec.locale.includes('en-US');
     const utterances = spec.contentBrief === DEFAULT_SCRIPT_BRIEF
-      ? Array.from({ length: 16 }, (_, index) => ({
+      ? (english
+        ? serviceLines(['Sure, I can check.', 'Yep, I see the outage.'], ['Definitely, I can help.', 'OK, I have the date.'])
+        : spec.locale.includes('ja-JP')
+          ? serviceLines(['こちらで回線の状況を確認しますね。', '教えていただいたご住所の辺りで障害が出ていますね。'],
+            ['お届けの時間を一緒に確認しましょう。', '夕方以降なら受け取れるんですね。'], ['少々お待ちください。', '手続きが完了しました。', 'かしこまりました。', 'よかったです。'])
+          : spec.locale.includes('zh-HK')
+          ? serviceLines(['得呀，等我同你睇吓件貨去咗邊先。', '多謝晒，原本係今日送到㗎嘛。'],
+            ['張卡突然用唔到係幾麻煩嘅，我幫你查返嗰筆交易先。', '收到喇，你頭先喺超市碌嗰筆係咪？'], ['等我睇睇先。', '搞掂喇。', '冇問題。', '你放心。'])
+          : serviceLines(['Je vais regarder où en est votre colis.', 'Merci pour la date, je vois le retard.'],
+            ['On va vérifier ce débit ensemble.', 'Vous ne reconnaissez pas ce paiement, je vois.'], ['Un instant.', 'C’est réglé.', 'D’accord.', 'Très bien.'])
+      ).map((text, index) => spec.locale.includes('zh-HK') && defaultAttempt <= cantoneseFailuresThrough
+        ? { speaker: 1, text: index === 0 && defaultAttempt === cantoneseFailuresThrough - 2
+          ? '好，等我睇睇先。' : '[reassuring] 好，等我睇睇先。' }
+        : ({
         speaker: 1,
-        text: spec.locale.includes('en-US') && defaultAttempt === 1 && index === 0 ? 'Hello.'
-          : spec.locale.includes('en-US') && defaultAttempt === 2 && index === 0 ? '[calm] Hello. [CALM] Hello again.'
-          : index < 4 ? '[calm] Hello.' : '[reassuring] I can help.',
+        text: index !== 0 ? text
+          : english && defaultAttempt === 1 ? 'Hello.'
+          : english && defaultAttempt === 2 ? `${text} [CALM] Hello again.`
+          : text,
       }))
       : spec.contentBrief === unlimitedCalmBrief
       ? Array.from({ length: 16 }, () => ({ speaker: 1, text: '[calm] Hello.' }))
@@ -322,7 +385,16 @@ test('generates on the configured Azure connection, reports failed locales, and 
           : spec.contentBrief === taggedBrief
           ? [{ speaker: 1, text: '[calm] Hmm... Welcome. [reassuring] How can I help?' }, { speaker: 2, text: '[calm] 你好。 [reassuring] 我可以幫你。' }]
           : [{ speaker: 1, text: 'Bonjour, comment puis-je vous aider?' }, { speaker: 2, text: 'Je voudrais changer la date, s’il vous plaît.' }];
-    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ utterances }) } }] });
+    const replacingCantonese = spec.contentBrief === DEFAULT_SCRIPT_BRIEF && spec.locale.includes('zh-HK') &&
+      spec.previousScript && defaultAttempt > cantoneseFailuresThrough;
+    const replacement = replacingCantonese ? utterances.map((item, index) => {
+      // On the first valid replacement, keep call 4 unchanged apart from a style tag.
+      if (defaultAttempt === cantoneseFailuresThrough + 1 && index >= 12) {
+        return { ...item, text: item.text.replace(/^\[[^\]]+\]/, '[reassuring]') };
+      }
+      return index % 4 === 0 ? { ...item, text: `${item.text} [reassuring] 我可以幫你改期。` } : item;
+    }) : utterances;
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ utterances: replacement }) } }] });
   };
   let port = 0;
   const server = createServer();
@@ -432,23 +504,42 @@ test('generates on the configured Azure connection, reports failed locales, and 
     let defaultResults: ScriptGenerationResult = [];
     let sawCalmLimitFailure = false;
     await generateScriptsWithRetry(
-      scriptGenerationSchema.parse({ ...brief, locales: ['en-US', 'fr-CA'], speakers: 1, utteranceCount: 16, prompt: DEFAULT_SCRIPT_BRIEF, expressionTags: true }),
-      new AbortController().signal,
+      scriptGenerationSchema.parse({ ...brief, locales: ['en-US', 'fr-CA', 'ja-JP', 'zh-HK'], speakers: 1, utteranceCount: 16, prompt: DEFAULT_SCRIPT_BRIEF, expressionTags: true }),
+      AbortSignal.timeout(15_000),
       (_progress, results) => {
         defaultResults = results;
         if (results.some(result => 'error' in result && /used \[calm\] 5 times/.test(result.error))) sawCalmLimitFailure = true;
       },
     );
     assert.equal(calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && call.locale.includes('en-US')).length, 3);
-    assert.equal(calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && call.locale.includes('fr-CA')).length, 1);
+    const localizedCalls = calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && /fr-CA|ja-JP/.test(call.locale));
+    assert.equal(localizedCalls.length, 2);
+    assert.equal(localizedCalls[0].instructions, localizedCalls[1].instructions);
+    assert.match(localizedCalls[0].instructions, /For customer-service dialogue in any locale, start every agent reply.*before answering, checking details, proposing a fix, or confirming a result/);
+    assert.match(localizedCalls[0].instructions, /all 16 agent utterances, not just the first two.*\(3\) acknowledge their clarification or preference.*\(4\) respond warmly/);
+    assert.match(localizedCalls[0].instructions, /Verification is not a read-back.*Do not echo the caller’s full name, address, or phone number.*Still confirm dates, times, routes, and destinations/);
+    const cantoneseCalls = calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && call.locale.includes('zh-HK'));
+    assert.equal(cantoneseCalls.length, 3);
+    assert.ok(cantoneseCalls[0].instructions.includes(localizedCalls[0].instructions.split('Use fictional examples')[0]));
+    assert.match(cantoneseCalls[0].instructions, /好呀.*唔該晒.*not required words or lines to copy/);
+    assert.match(cantoneseCalls[0].instructions, /資料啱喇.*Use「即係」only if the agent is genuinely clarifying or paraphrasing/);
+    assert.match(localizedCalls[0].instructions, /A few idiomatic words or one short clause is usually enough.*Do not restate the request, stack thanks and reassurance/);
     assert.equal(sawCalmLimitFailure, true);
+    assert.equal(defaultResults.length, 4);
     for (const result of defaultResults) {
       assert.ok('script' in result);
       assert.equal(result.script.utterances.length, 16);
-      assert.equal(result.script.utterances.filter(({ text }) => text === '[calm] Hello.').length, 4);
+      assert.equal(result.script.utterances.filter(({ text }) => text.startsWith('[calm]')).length, 4);
     }
     assert.ok('script' in defaultResults[0]);
-    assert.match(scriptFileText(defaultResults[0].script, 1), /^en-US_00001\t\[calm\] Hello\.\r\n/);
+    assert.match(scriptFileText(defaultResults[0].script, 1), /^en-US_00001\t\[reassuring\] Sure, I can check\.\r\nen-US_00002\t\[reassuring\] Yep, I see the outage\.\r\n/);
+    assert.ok('script' in defaultResults[1]);
+    assert.match(scriptFileText(defaultResults[1].script, 1), /^fr-CA_00001\t\[reassuring\] Je vais regarder où en est votre colis\./);
+    assert.ok('script' in defaultResults[2]);
+    assert.match(scriptFileText(defaultResults[2].script, 1), /^ja-JP_00001\t\[reassuring\] こちらで回線の状況を確認しますね。/);
+    assert.ok('script' in defaultResults[3]);
+    assert.ok(defaultResults[3].script.utterances.every(item => !('opening' in item) && item.speaker === 1 && !!item.text));
+    assert.match(scriptFileText(defaultResults[3].script, 1), /^zh-HK_00001\t\[reassuring\] 得呀，.*\r\nzh-HK_00002\t\[reassuring\] 多謝晒，/);
 
     let unlimitedResults: ScriptGenerationResult = [];
     await generateScriptsWithRetry(
@@ -505,9 +596,11 @@ test('generates on the configured Azure connection, reports failed locales, and 
     progressFetch.mock.restore();
   }
 
-  const getRun = async () => ((await (await fetch(`${url}run`)).json()) as ScriptGenerationStatus).run;
-  async function waitForRun(predicate: (run: NonNullable<Awaited<ReturnType<typeof getRun>>>) => boolean) {
-    for (let count = 0; count < 100; count++) {
+  const getStatus = async (): Promise<ScriptGenerationStatus> => (await fetch(`${url}run`)).json();
+  const getRun = async () => (await getStatus()).run;
+  async function waitForRun(predicate: (run: NonNullable<Awaited<ReturnType<typeof getRun>>>) => boolean, timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       const run = await getRun();
       if (run && predicate(run)) return run;
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -552,6 +645,91 @@ test('generates on the configured Azure connection, reports failed locales, and 
     assert.equal(pausedRetry?.state, 'paused');
     assert.equal(pausedRetry?.retryAt, undefined);
     assert.deepEqual(pausedRetry?.results, waiting.results);
+
+    const templateCalls = (locale: string) => calls.filter(call => call.contentBrief === DEFAULT_SCRIPT_BRIEF && call.locale.includes(locale));
+    const cantoneseBaseline = templateCalls('zh-HK').length;
+    const frenchBaseline = templateCalls('fr-CA').length;
+    cantoneseFailuresThrough = cantoneseBaseline + 3;
+    const serviceInput = { ...brief, locales: ['zh-HK', 'fr-CA'], speakers: 1, utteranceCount: 16, prompt: DEFAULT_SCRIPT_BRIEF, expressionTags: true };
+    assert.equal((await post('run', serviceInput)).status, 202);
+    const serviceWaiting = await waitForRun(run => run.id !== waiting.id && run.retryAt !== undefined);
+    assert.ok(serviceWaiting.results.some(result => 'script' in result && result.script.locale === 'fr-CA'));
+    const serviceDone = await waitForRun(run => run.id === serviceWaiting.id && run.state === 'completed', 12_000);
+    assert.equal(templateCalls('zh-HK').length, cantoneseBaseline + 4);
+    assert.equal(templateCalls('fr-CA').length, frenchBaseline + 1);
+    assert.match(templateCalls('zh-HK')[cantoneseBaseline + 1].instructions, /Check replies: 1\. Reply 2 repeats.*Reply 16 repeats/);
+    assert.match(templateCalls('zh-HK').at(-1)?.instructions ?? '', /Revise the previous attempt.*Reply 2 repeats an opening too often/);
+    assert.ok(serviceDone.results.every(result => 'script' in result));
+
+    const beforeRegenerate = templateCalls('zh-HK').length;
+    cantoneseFailuresThrough = beforeRegenerate + 1;
+    const previous = serviceDone.results[0];
+    assert.ok('script' in previous);
+    assert.equal(templateCalls('zh-HK').at(-1)?.previousScript, undefined);
+    const serviceAction = (name: string, extra: object = {}) => post('run/action', { action: name, id: serviceDone.id, ...extra });
+    assert.equal((await serviceAction('regenerate', { locale: 'zh-HK' })).status, 200);
+    const regenerationWaiting = await waitForRun(run => run.regeneration?.message.includes('Retrying in') === true);
+    assert.deepEqual(regenerationWaiting.results, serviceDone.results);
+    const duplicateWaiting = await waitForRun(run => /repeated an existing mini-call.*call numbers 4\./.test(run.regeneration?.message ?? ''));
+    assert.deepEqual(duplicateWaiting.results, serviceDone.results);
+    const regenerated = await waitForRun(run => run.regeneration?.state === 'done', 6000);
+    assert.equal(regenerated.regeneration?.message, 'Preview regenerated.');
+    assert.equal(templateCalls('zh-HK').length, beforeRegenerate + 3);
+    for (const attempt of templateCalls('zh-HK').slice(beforeRegenerate)) {
+      assert.deepEqual(attempt.previousScript, previous.script.utterances);
+      assert.match(attempt.instructions, /Keep the four domains in the same order.*required verification fields.*different customer problem/);
+    }
+    assert.match(templateCalls('zh-HK').at(-1)?.instructions ?? '', /repeated an existing mini-call.*call numbers 4/);
+    assert.notDeepEqual(regenerated.results[0], previous);
+    assert.deepEqual(regenerated.results[1], serviceDone.results[1]);
+
+    cantoneseFailuresThrough = beforeRegenerate + 10;
+    assert.equal((await serviceAction('regenerate', { locale: 'zh-HK' })).status, 200);
+    await waitForRun(run => run.regeneration?.message.includes('Retrying in') === true);
+    assert.equal((await serviceAction('stop-regeneration')).status, 200);
+    const stopped = await waitForRun(run => run.regeneration?.state === 'done');
+    assert.equal(stopped.regeneration?.message, 'Regeneration stopped. Preview unchanged.');
+    assert.deepEqual(stopped.results, regenerated.results);
+
+    const interruptible = { ...brief, locales: ['en-US', 'fr-CA'], prompt: 'Check stopping active requests.' };
+    const checkActive = (run: NonNullable<Awaited<ReturnType<typeof getRun>>>) =>
+      run.input.prompt === interruptible.prompt && run.activeLocales.includes('en-US') &&
+      run.results.some(result => 'script' in result && result.script.locale === 'fr-CA');
+    assert.equal((await post('run', interruptible)).status, 202);
+    const activeBatch = await waitForRun(checkActive);
+    assert.equal((await post('run/action', { action: 'stop', id: activeBatch.id })).status, 200);
+    const stoppedBatch = await waitForRun(run => run.id === activeBatch.id && run.state === 'paused');
+    assert.deepEqual(stoppedBatch.results, activeBatch.results);
+    assert.equal(abortedRequests, 1);
+    holdCancelableLocale = false;
+    assert.equal((await post('run/action', { action: 'resume', id: activeBatch.id })).status, 200);
+    await waitForRun(run => run.id === activeBatch.id && run.state === 'completed');
+    assert.equal(calls.filter(call => call.contentBrief === interruptible.prompt && call.locale.includes('fr-CA')).length, 1);
+
+    holdCancelableLocale = true;
+    assert.equal((await post('run', interruptible)).status, 202);
+    const cancelBatch = await waitForRun(run => run.id !== activeBatch.id && checkActive(run));
+    assert.equal((await post('run/action', { action: 'cancel', id: cancelBatch.id })).status, 200);
+    const cancelled = await waitForRun(run => run.id === cancelBatch.id && run.state === 'cancelled');
+    assert.deepEqual(cancelled.results, cancelBatch.results);
+    assert.equal(abortedRequests, 2);
+    assert.equal((await post('run/action', { action: 'resume', id: cancelBatch.id })).status, 409);
+
+    const pendingImprovement = post('improve-brief', { prompt: 'Cancel this brief improvement.', style: '', speakers: 1, consent: true });
+    let busyRequest: ScriptGenerationStatus['textRequest'];
+    for (let count = 0; count < 100; count++) {
+      busyRequest = (await getStatus()).textRequest;
+      if (busyRequest && improvementStarted) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(busyRequest?.kind === 'improve-brief');
+    assert.equal((await post('run/cancel-text', { id: cancelBatch.id })).status, 409);
+    assert.equal((await post('run/cancel-text', { id: busyRequest.id })).status, 200);
+    const cancelledImprovement = await pendingImprovement;
+    assert.equal(cancelledImprovement.status, 409);
+    assert.deepEqual(await cancelledImprovement.json(), { error: 'Azure text request cancelled.' });
+    assert.equal(abortedRequests, 3);
+    assert.equal((await getStatus()).textBusy, false);
   } finally {
     releaseRunLocale?.();
   }

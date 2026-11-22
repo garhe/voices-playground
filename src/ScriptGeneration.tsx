@@ -28,13 +28,14 @@ Write 4 agent utterances per call, in this order:
 * **Utterances 00013–00016 (Call 4 — Flight & Hotel Travel):** Rebook a flight or adjust a hotel booking after a flight change. Whenever reading back the route, give each endpoint's specific airport name as spoken locally, including the city when natural, then its matching uppercase 3-letter IATA code in parentheses: Hanoi Noi Bai (HAN) to Tokyo Narita (NRT). Do not use a city alone, such as Tokyo (NRT), or a bare code. Vary the route. Verify **Customer Name** + **Travel/Check-in Date** + **Phone Number**.
   In both scenarios, read back the revised itinerary in natural speech: the airline name, a plausible flight number with that airline's designator, and the departure and arrival dates and times in each airport's local time. Make the timing plausible for the route and say the arrival date explicitly, especially if it changes overnight. Keep the dates consistent with any hotel change. Present a proposed option before asking for approval and confirm the change only in a later utterance.
 
-For each locale and run, vary the incident, cause, and resolution within each domain. Vary case-specific nouns (devices, merchants, parcels, routes). Don't translate or recycle a script by just swapping names.
+For each locale and run, vary the incident, cause, and resolution within each domain. Don't recycle a case by just swapping names, dates, or routes.
 
-Cover the issue, verification, a concrete fix, and confirmation. End any utterance at the question. Use at most 1 brief greeting across the calls; focus on solving the problem.
+Cover the issue, verification, a concrete fix, and confirmation. Thank the caller and confirm the details match without reciting their full name, address, or phone number back. Read back only what needs checking. End any utterance at the question. Use at most 1 brief greeting across the calls; focus on solving the problem.
+**Service Assurance:** Start EVERY agent reply by acknowledging the customer's request, details, or response before answering, verifying, proposing a fix, or confirming it. A few natural words are enough. Use each opener at most twice, never in a row. Don't promise unverified outcomes.
 
 ### Output Rules`;
 const FORMAT = '1. **Format:** Return 16 utterances; no IDs, line numbers, headers, speaker labels, or stage directions. Write spoken words and punctuation without asterisks; parentheses only for airport codes.';
-const DELIVERY_RULES = `2. **Spoken hesitations:** Use local fillers, such as \`um...\`, \`yep...\`, \`alright...\`, \`ah ha...\`  in English, \`嗯嗯...\`, \`是...的...\`, \`这样子...\` in Mandarin, \`即係...\` in Cantonese, \`euh...\`, \`oui...\`, \`alors...\`  in French, or \`à...\`, \`vâng...\` in Vietnamese.
+const DELIVERY_RULES = `2. **Spoken hesitations:** Use local fillers or pauses when the agent is checking something or thinking. Don't interrupt a clear explanation just to insert a filler.
    - Include **at least 2 hesitations per mini-call** (at least 8 total).
    - **Positional Distribution Rule:** Do NOT put them all at the start of lines—place at least half **in the middle of a sentence** or **between two sentences** inside the same utterance.
 3. **Synthetic PII & Digit Formatting:** Use realistic localized dummy names, dates, street addresses, and full phone numbers; vary them across calls and never use \`Juniper\`, \`晴禾\`, or \`10/15/2026\`. Write ALL numbers, including dates, addresses, phone numbers, and durations, as **digits**.
@@ -120,14 +121,16 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const regeneration = preview?.regeneration;
   const isRegenerating = regeneration?.state === 'running';
   const scripts = preview?.results.flatMap(result => 'script' in result ? [result.script] : []) ?? [];
-  const previewIsGenerating = preview?.state === 'running' || preview?.state === 'pausing';
+  const previewIsGenerating = preview?.state === 'running' || preview?.state === 'pausing' ||
+    preview?.state === 'stopping' || preview?.state === 'cancelling';
+  const textRequest = runStatus?.textRequest;
   const failedLocales = preview?.results.filter(result => 'error' in result && result.retryAfterMs === undefined).length ?? 0;
   const options = catalog.filter(option => option.label.toLowerCase().includes(localeSearch.trim().toLowerCase()));
   const locales = selection ?? [];
   const readyToImprove = !!connected && !!deployment && !!prompt.trim();
   const readyToGenerate = !!connected && !!deployment && !!speechConfigured && !catalogLoading && !localeError;
   const unavailable = !runStatus || !!statusError || runStatus.textBusy || !!busy || commandPending;
-  const canRegenerate = !unavailable && readyToGenerate && !isRegenerating && preview?.state !== 'pausing';
+  const canRegenerate = !unavailable && readyToGenerate && !isRegenerating && (!previewIsGenerating || preview?.state === 'running');
   const controlsDisabled = unavailable || previewIsGenerating || isRegenerating;
 
   useEffect(() => {
@@ -264,8 +267,9 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     await runCommand(runPath, input.data);
   }
 
-  function runAction(action: 'pause' | 'resume' | 'restart' | 'regenerate' | 'stop-regeneration', locale?: string) {
+  function runAction(action: 'pause' | 'stop' | 'cancel' | 'resume' | 'restart' | 'regenerate' | 'stop-regeneration', locale?: string) {
     if (!preview || unavailable) return;
+    if (action === 'cancel' && !window.confirm('Cancel this run? Completed previews will be kept.')) return;
     if (action === 'restart' && !window.confirm('Restart with the same settings? This replaces the current previews and makes new Azure requests.')) return;
     void runCommand(`${runPath}/action`, { id: preview.id, action, ...(locale === undefined ? {} : { locale }) });
   }
@@ -395,18 +399,30 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         <div className="button-row">
           <button className="primary" disabled={controlsDisabled || !readyToGenerate || !locales.length} type="submit">Generate preview</button>
           {preview?.state === 'running' && <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('pause')}>Pause</button>}
+          {(preview?.state === 'running' || preview?.state === 'pausing') &&
+            <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('stop')}>Stop</button>}
+          {(preview?.state === 'running' || preview?.state === 'pausing' || preview?.state === 'stopping' || preview?.state === 'paused') &&
+            <button className="secondary danger" type="button" disabled={unavailable} onClick={() => runAction('cancel')}>Cancel</button>}
           {(preview?.state === 'paused' || preview?.state === 'failed') &&
             <button className="secondary" type="button" disabled={controlsDisabled} onClick={() => runAction('resume')}>Resume</button>}
           {preview && !previewIsGenerating &&
             <button className="secondary" type="button" disabled={controlsDisabled} onClick={() => runAction('restart')}>Restart</button>}
+          {isRegenerating &&
+            <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('stop-regeneration')}>Stop regeneration</button>}
+          {textRequest && <button className="secondary" type="button" disabled={commandPending || textRequest.cancelling}
+            onClick={() => void runCommand(`${runPath}/cancel-text`, { id: textRequest.id })}>Cancel text request</button>}
         </div>
         <small>Generation continues across browser refreshes. Each Azure OpenAI attempt may incur charges.</small>
         {!runStatus && !statusError && <p role="status">Checking generation status…</p>}
-        {runStatus?.textBusy && <p role="status">Another Azure text request is running.</p>}
+        {runStatus?.textBusy && <p role="status">{textRequest?.cancelling ? 'Cancelling Azure text request…' :
+          textRequest?.kind === 'improve-brief' ? 'Improving the brief with Azure…' : 'Another Azure text request is running.'}</p>}
         {preview && <p role="status">{{
           running: preview.retryAt ? 'Waiting to retry' : 'Generating scripts',
           pausing: 'Pausing after the current requests finish',
+          stopping: 'Stopping active requests',
+          cancelling: 'Cancelling the run',
           paused: 'Paused',
+          cancelled: 'Run cancelled',
           completed: 'Run finished',
           failed: 'Run interrupted',
         }[preview.state]} · {scripts.length}/{preview.input.locales.length} generated
@@ -425,7 +441,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       {preview && <p role="status">{scripts.length} of {preview.input.locales.length} scripts generated.
         {failedLocales > 0 && ` ${failedLocales} failed.`}
         {scripts.length + failedLocales < preview.input.locales.length && ` ${preview.input.locales.length - scripts.length - failedLocales} ${previewIsGenerating ? 'pending' : 'unfinished'}.`}</p>}
-      {preview && <small>Expression tags: {preview.input.expressionTags ? 'On' : 'Off'}. Regenerate uses the brief and settings from this preview and replaces only that locale on success. Azure OpenAI charges may apply.</small>}
+      {preview && <small>Expression tags: {preview.input.expressionTags ? 'On' : 'Off'}. Regenerate retries recoverable errors until it succeeds or you stop it. It uses the original brief and settings and replaces only that locale on success. Azure OpenAI charges may apply to each attempt.</small>}
       {preview?.results.map(result => {
         const locale = resultLocale(result);
         const label = studioLocaleLabel(locale);
@@ -434,9 +450,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         const feedback = regeneration?.locale === locale ? regeneration : undefined;
         const actions = !isRetrying && <div className="script-locale-actions">
           <div className="button-row">
-            {feedback?.state === 'running'
-              ? <button className="secondary" type="button" disabled={unavailable} onClick={() => runAction('stop-regeneration')}>Stop regeneration</button>
-              : <button className="secondary" type="button" disabled={!canRegenerate}
+            {feedback?.state !== 'running' && <button className="secondary" type="button" disabled={!canRegenerate}
                 aria-label={`Regenerate ${label}`} onClick={() => runAction('regenerate', locale)}>Regenerate</button>}
           </div>
           {feedback && <p className={feedback.state === 'error' ? 'error-text' : 'muted'}

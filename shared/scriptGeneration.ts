@@ -85,7 +85,7 @@ export type ScriptGenerationResult = z.infer<typeof scriptGenerationResultSchema
 export type ScriptGenerationRun = {
   id: string;
   input: ScriptGenerationRequest;
-  state: 'running' | 'pausing' | 'paused' | 'completed' | 'failed';
+  state: 'running' | 'pausing' | 'stopping' | 'cancelling' | 'paused' | 'cancelled' | 'completed' | 'failed';
   results: ScriptGenerationResult;
   activeLocales: string[];
   firstLocale?: string;
@@ -93,7 +93,11 @@ export type ScriptGenerationRun = {
   error?: string;
   regeneration?: { locale: string; state: 'running' | 'done' | 'error'; message: string };
 };
-export type ScriptGenerationStatus = { run?: ScriptGenerationRun; textBusy: boolean };
+export type ScriptGenerationStatus = {
+  run?: ScriptGenerationRun;
+  textBusy: boolean;
+  textRequest?: { id: string; kind: 'improve-brief' | 'generate'; cancelling: boolean };
+};
 
 export const scriptExportSchema = z.object({
   directory: z.string().trim().min(1, 'Enter a destination folder.').max(2048),

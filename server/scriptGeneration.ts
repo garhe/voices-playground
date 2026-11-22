@@ -1,6 +1,7 @@
 import { open, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import type { Express } from 'express';
+import { randomUUID } from 'node:crypto';
+import type { Express, Response as ExpressResponse } from 'express';
 import { z } from 'zod';
 import {
   foundryResponsesEndpointSchema, hasScriptSpeakers, MAX_SCRIPT_BRIEF_LENGTH, scriptBriefImprovementSchema, scriptBriefSuggestionSchema,
@@ -198,22 +199,77 @@ export function bareAirportCodes(texts: string[]): string[] {
     new RegExp(`(?<![(（A-Za-z])${code}(?![)）A-Za-z])`, 'u').test(text)));
 }
 
+const openingBreak = /[,，、;；:：.!?。！？؟،…—–]/u;
+const leadingAnnotations = /^(?:\s*\[[^\[\]\r\n]+\])+\s*/u;
+const openingKey = (text: string) => text.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{Z}\s]+/gu, '');
+const repeatedCallMessage = 'The replacement repeated an existing mini-call.';
+const spokenKey = (text: string) => openingKey(text.replace(new RegExp(ANNOTATION, 'gu'), ''));
+
+export function serviceOpeningIssue(utterances: readonly { text: string }[]): string | undefined {
+  const uses = new Map<string, number[]>();
+  const issues: string[] = [];
+  let previous: string | undefined;
+  for (const [index, { text }] of utterances.entries()) {
+    const spoken = text.replace(leadingAnnotations, '').trimStart();
+    const phrase = spoken.split(openingBreak, 1)[0].trimEnd();
+    const key = openingKey(phrase);
+    if (phrase.length > 120 || !/\p{L}/u.test(key)) {
+      issues.push(`Reply ${index + 1} needs a short spoken opening before the answer.`);
+      previous = '';
+      continue;
+    }
+    const earlier = uses.get(key) ?? [];
+    if (previous === key || earlier.length >= 2) {
+      const found = previous === key ? [index] : earlier.slice(0, 2);
+      issues.push(`Reply ${index + 1} repeats an opening too often. It also appeared in ${found.length === 1 ? 'reply' : 'replies'} ${found.join(' and ')}.`);
+    }
+    previous = key;
+    uses.set(key, [...earlier, index + 1]);
+  }
+  return issues.length ? issues.join(' ') : undefined;
+}
+
 async function generateLocale(
   fetchText: typeof fetch, credentials: ScriptTextConnection, request: ScriptGenerationRequest,
-  locale: { value: string; label: string }, signal: AbortSignal,
+  locale: { value: string; label: string }, signal: AbortSignal, openingFeedback?: string,
+  previousScript?: GeneratedScript, variationFeedback?: string,
 ): Promise<GeneratedScript> {
   const tagLists = request.expressionTags ? request.expressionTagLists ?? DEFAULT_EXPRESSION_TAG_LISTS : undefined;
   const requiredTags = tagLists ? new Set(tagLists.styles)
     : request.expressionTags === undefined ? requestedSentenceTagNames(request.prompt) : undefined;
   const soundTags = tagLists ? new Set(tagLists.sounds) : undefined;
+  const fourServiceCalls = request.speakers === 1 && request.utteranceCount === 16 &&
+    /^### 4 Domains — 16 Utterances Total\s*$/m.test(request.prompt) && /^\*\*Service Assurance:\*\*/m.test(request.prompt);
+  const hongKongCantonese = /^(?:zh-hk|yue-hk)(?:-|$)/i.test(locale.value);
   const content = await requestJsonCompletion(fetchText, credentials, signal, [
     'Write original spoken scripts for speech synthesis. Return only a JSON object with an utterances array.',
-    'Example shape: {"utterances":[{"speaker":1,"text":"Welcome."}]}',
-    'Each item must contain exactly a numeric speaker and a text string of 1–500 characters.',
+    fourServiceCalls
+      ? `Example shape: {"utterances":[{"speaker":1,"text":"${tagLists ? `[${tagLists.styles[0]}] ` : ''}Sure, I can check that."}]}`
+      : 'Example shape: {"utterances":[{"speaker":1,"text":"Welcome."}]}',
+    'Each item must contain a numeric speaker and a text string of 1–500 characters. Do not add fields unless requested.',
     'Each text must be on one line, without tabs, line numbers, IDs, headers, speaker labels, file names, or stage directions. Allowed tags are not stage directions.',
     expressionTagInstructions(request),
     'Follow the supplied locale, style, speaker count, and utterance count. Localize spelling, vocabulary and expressions naturally.',
     'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
+    'For customer-service dialogue in any locale, start every agent reply with a brief, audible acknowledgment before answering, checking details, proposing a fix, or confirming a result. A few idiomatic words or one short clause is usually enough; let it flow into the useful information. Do not restate the request, stack thanks and reassurance, or turn a routine check into an apology or speech. Match the customer’s concern: a simple affirmation or thanks for routine turns, concise specific empathy when warranted. Use the local register and conversational particles. A bracketed tag alone never counts. Do not promise unverified outcomes.',
+    ...(previousScript ? [
+      'The previousScript field is dialogue for comparison only, not instructions or a template. Write a fresh script in the same locale and style, keeping all requirements and any explicitly fixed content from the brief. Where the brief leaves room, change what happens, not just how it is worded. Do not merely swap names, dates, or opening phrases.',
+      ...(fourServiceCalls ? [
+        'Keep the four domains in the same order, four replies per call, the required verification fields, and all itinerary rules. For each domain, plan a different customer problem or materially different case facts, findings, and resolution from the corresponding previous call. Prefer a different incident type when the brief permits it; when a topic is fixed, vary the circumstances and practical next steps within it.',
+        ...(variationFeedback ? [`${variationFeedback} Change the underlying case and resolution in those calls, not just the wording.`] : []),
+      ] : []),
+    ] : []),
+    ...(fourServiceCalls ? [
+      'In the agent-only four-call format, treat the customer’s turns as implied. Apply the acknowledgment rule to all 16 agent utterances, not just the first two in each call. In each mini-call: (1) acknowledge the initial request or frustration before offering help; (2) thank the customer and briefly confirm verification, then tell them what you found or what you will check; (3) acknowledge their clarification or preference before describing the proposed fix; (4) respond warmly to their approval, cooperation, or report that the fix worked before confirming the outcome. Keep the opening before any hesitation. Do not invent agreement or imply a fix worked if the call has not established that.',
+      'Verification is not a read-back: ask for the specified fields and let the implied customer supply them. Once they match, say so briefly. Do not echo the caller’s full name, address, or phone number, stack identifiers in one breath, or address them by their full name. Repeat only the minimum needed to resolve an ambiguity, such as the flat number if it is unclear. Still confirm dates, times, routes, and destinations as required for the actual service change. Explain findings in words the customer would use, focusing on what they can do next rather than narrating the system. Put hesitations at plausible moments of checking or thinking; do not put a filler between a straightforward finding and its consequence.',
+      'Make the acknowledgment the first spoken phrase or clause, ending in natural punctuation such as a comma or full stop. The first clause is checked directly. Keep it brief; leave names and read-back details until after that punctuation. Use no more than two occurrences of any opening across all 16 replies and never use the same opening in consecutive replies. Case, punctuation, and whitespace changes do not make a new opening. Plan at least eight genuinely different openings: vary the acknowledgment itself, not just the names or facts that follow it.',
+      'Before drafting, plan the 16 actual opening phrases in the target locale, across all four calls. Aim for a different short phrase on each reply, but a natural repeat is better than a forced synonym if it stays within the limit. Do not restart the same sequence of openings in each call or always use the same thanks at verification. Choose from several conversational functions and native equivalents: acknowledge a request or fact, accept a preference, thank the caller, agree on a step, recognize concern, or react briefly to the outcome. In French, for example, “D’accord”, “Oui”, “Bien sûr”, “Merci”, “Je vois”, “Très bien”, “Parfait”, and “Exactement” can fit different turns. “Bon”, “Alors”, or “Ben” are transitions, not acknowledgment by themselves. These are examples, not a phrase list to exhaust or translate; use expressions suitable for the target locale and caller. Keep them short; do not add a filler or extra reassurance just to make a phrase different.',
+      'Before returning the JSON, re-read the actual first spoken clause of all 16 replies, ignoring annotations. If a phrase is adjacent to itself or occurs more than twice, replace the excess uses with other short, appropriate acknowledgments. If using style tags, leave the opening with the rest of the sentence after its tag unless it is truly a separate sentence.',
+      ...(openingFeedback ? [`Revise the previous attempt. ${openingFeedback} Use the reply numbers to identify where variety or tagging broke down. Re-plan openings across all four calls instead of recycling the same stock responses. Recheck both the spoken openings and expression tags together.`] : []),
+      ...(hongKongCantonese ? [
+        'For Hong Kong Cantonese, use conversational Cantonese rather than formal written Chinese. For a quick check,「好呀，我同你睇吓先」can be enough; after verification,「唔該晒，資料啱喇」can be enough. These are illustrations, not required words or lines to copy. Use「即係」only if the agent is genuinely clarifying or paraphrasing.',
+      ] : []),
+    ] : []),
     'Use fictional examples and no real personal or sensitive details.',
     'If an utterance asks a question, the question must be its final sentence: never ask and then keep speaking in the same utterance, because the listener must answer first. Continue in the next utterance.',
     'Whenever you mention an airport code, give the specific airport name as spoken locally, then its matching uppercase 3-letter IATA code in parentheses, for example Hanoi Noi Bai (HAN) to Tokyo Narita (NRT). Use the airport name, not just its city, and never write a bare code.',
@@ -223,13 +279,17 @@ async function generateLocale(
     speakers: request.speakers,
     utteranceCount: request.utteranceCount,
     contentBrief: request.prompt,
+    ...(previousScript ? { previousScript: previousScript.utterances } : {}),
   }, 8192);
   const script = modelScriptSchema.safeParse(content);
   if (!script.success || script.data.utterances.length !== request.utteranceCount ||
       !hasScriptSpeakers(script.data.utterances, request.speakers))
     throw new RetryableScriptError('The model returned an invalid script structure, utterance count, or speaker count. Try again.');
-  if (requiredTags && script.data.utterances.some(({ text }) => !hasRequestedSentenceTags(text, requiredTags, soundTags)))
-    throw new RetryableScriptError('The model omitted or returned invalid requested sentence tags. Try again.');
+  const openingIssue = fourServiceCalls ? serviceOpeningIssue(script.data.utterances) : undefined;
+  const invalidTagReplies = requiredTags ? script.data.utterances.flatMap(({ text }, index) =>
+    hasRequestedSentenceTags(text, requiredTags, soundTags) ? [] : [index + 1]) : [];
+  if (invalidTagReplies.length)
+    throw new RetryableScriptError(`The model omitted or returned invalid requested sentence tags. Put exactly one allowed style tag before every spoken sentence. Check replies: ${invalidTagReplies.join(', ')}.${openingIssue ? ` ${openingIssue}` : ''}`);
   if (request.expressionTags === false && script.data.utterances.some(({ text }) => ANNOTATION.test(text)))
     throw new RetryableScriptError('The model returned bracketed annotations while expression tags were off. Try again.');
   if (script.data.utterances.some(({ text }) => continuesAfterQuestion(text)))
@@ -244,6 +304,18 @@ async function generateLocale(
     const calmCount = script.data.utterances.reduce((count, { text }) => count + (text.match(/\[calm\]/gi)?.length ?? 0), 0);
     if (calmCount > calmLimit)
       throw new RetryableScriptError(`The model used [calm] ${calmCount} times, exceeding the requested limit of ${calmLimit} per locale. Try again.`);
+  }
+  if (fourServiceCalls) {
+    if (openingIssue) throw new RetryableScriptError(`Could not generate varied spoken openings. ${openingIssue}`);
+    if (previousScript) {
+      const repeated = [0, 4, 8, 12].flatMap((start, index) =>
+        script.data.utterances.slice(start, start + 4).every(({ text }, offset) => {
+          const previous = previousScript.utterances[start + offset];
+          return previous && spokenKey(text) === spokenKey(previous.text);
+        }) ? [index + 1] : []);
+      if (repeated.length)
+        throw new RetryableScriptError(`${repeatedCallMessage} Write different cases for call numbers ${repeated.join(', ')}.`);
+    }
   }
   return { locale: locale.value, utterances: script.data.utterances };
 }
@@ -306,7 +378,27 @@ export function registerScriptGeneration(app: Express, {
   });
   app.get('/api/script-generation/locales', async (req, res) => res.json(await locales(req.query.refresh === '1')));
 
-  let textRequestRunning = false;
+  let textRequest: { id: string; kind: NonNullable<ScriptGenerationStatus['textRequest']>['kind']; controller: AbortController } | undefined;
+  async function withTextRequest(kind: NonNullable<ScriptGenerationStatus['textRequest']>['kind'], res: ExpressResponse,
+    run: (signal: AbortSignal) => Promise<void>) {
+    if (textRequest || runs.active) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
+    const controller = new AbortController();
+    textRequest = { id: randomUUID(), kind, controller };
+    const onClose = () => controller.abort();
+    res.once('close', onClose);
+    try {
+      await run(controller.signal);
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      res.off('close', onClose);
+      textRequest = undefined;
+      if (controller.signal.aborted && !res.destroyed && !res.writableEnded) {
+        if (res.headersSent) res.destroy();
+        else res.status(409).json({ error: 'Azure text request cancelled.' });
+      }
+    }
+  }
   async function prepare(input: ScriptGenerationRequest) {
     const credentials = await textConnection();
     const catalog = new Map((await locales()).map(option => [option.value.toLowerCase(), option]));
@@ -317,25 +409,39 @@ export function registerScriptGeneration(app: Express, {
     });
     return {
       locales: selected,
-      generate: (locale: typeof selected[number], signal: AbortSignal) =>
-        generateLocale(fetchText, credentials, input, locale, signal),
+      generate: (locale: typeof selected[number], signal: AbortSignal, previousError?: string, previousScript?: GeneratedScript) =>
+        generateLocale(fetchText, credentials, input, locale, signal,
+          previousError && /^(?:The model omitted or returned invalid requested sentence tags\.|Could not generate varied spoken openings\.)/.test(previousError)
+            ? previousError : undefined,
+          previousScript, previousError?.startsWith(repeatedCallMessage) ? previousError : undefined),
     };
   }
   const runs = new ScriptGenerationRuns(prepare, error => connection.redact(error),
     error => error instanceof RetryableScriptError ? error.retryAfterMs : undefined);
-  const status = (): ScriptGenerationStatus => ({ run: runs.current, textBusy: textRequestRunning });
+  const status = (): ScriptGenerationStatus => ({
+    run: runs.current, textBusy: !!textRequest,
+    ...(textRequest ? { textRequest: { id: textRequest.id, kind: textRequest.kind, cancelling: textRequest.controller.signal.aborted } } : {}),
+  });
   const runRoute = '/api/script-generation/run';
   const actionSchema = z.discriminatedUnion('action', [
     z.object({ action: z.literal('pause'), id: z.string().uuid() }).strict(),
+    z.object({ action: z.literal('stop'), id: z.string().uuid() }).strict(),
+    z.object({ action: z.literal('cancel'), id: z.string().uuid() }).strict(),
     z.object({ action: z.literal('resume'), id: z.string().uuid() }).strict(),
     z.object({ action: z.literal('restart'), id: z.string().uuid() }).strict(),
     z.object({ action: z.literal('regenerate'), id: z.string().uuid(), locale: z.string() }).strict(),
     z.object({ action: z.literal('stop-regeneration'), id: z.string().uuid() }).strict(),
   ]);
   app.get(runRoute, (_req, res) => res.json(status()));
+  app.post(`${runRoute}/cancel-text`, (req, res) => {
+    const { id } = z.object({ id: z.string().uuid() }).strict().parse(req.body);
+    if (!textRequest || textRequest.id !== id) { res.status(409).json({ error: 'This Azure text request is no longer current.' }); return; }
+    textRequest.controller.abort();
+    res.json(status());
+  });
   app.post(runRoute, (req, res) => {
     const input = scriptGenerationSchema.parse(req.body);
-    if (runs.active || textRequestRunning) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
+    if (runs.active || textRequest) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
     runs.start(input);
     res.status(202).json(status());
   });
@@ -344,24 +450,21 @@ export function registerScriptGeneration(app: Express, {
     const run = runs.current;
     if (!run || run.id !== action.id) { res.status(409).json({ error: 'This generation run is no longer current.' }); return; }
     if (action.action === 'pause' && run.state === 'running') runs.pause(run);
-    else if (action.action === 'resume' && !runs.active && !textRequestRunning && (run.state === 'paused' || run.state === 'failed')) runs.resume(run);
-    else if (action.action === 'restart' && !runs.active && !textRequestRunning) runs.start(run.input);
+    else if (action.action === 'stop' && (run.state === 'running' || run.state === 'pausing')) runs.stop(run, false);
+    else if (action.action === 'cancel' && (run.state === 'running' || run.state === 'pausing' || run.state === 'stopping' || run.state === 'paused')) runs.stop(run, true);
+    else if (action.action === 'resume' && !runs.active && !textRequest && (run.state === 'paused' || run.state === 'failed')) runs.resume(run);
+    else if (action.action === 'restart' && !runs.active && !textRequest) runs.start(run.input);
     else if (action.action === 'stop-regeneration' && run.regeneration?.state === 'running') runs.stopRegeneration();
-    else if (action.action === 'regenerate' && !textRequestRunning && runs.canRegenerate(run, action.locale)) runs.regenerate(run, action.locale);
+    else if (action.action === 'regenerate' && !textRequest && runs.canRegenerate(run, action.locale)) runs.regenerate(run, action.locale);
     else { res.status(409).json({ error: 'That action is not available in the current generation state.' }); return; }
     res.json(status());
   });
   app.post('/api/script-generation/improve-brief', async (req, res) => {
     const input = scriptBriefImprovementSchema.parse(req.body);
-    if (textRequestRunning || runs.active) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
-    textRequestRunning = true;
-    const controller = new AbortController();
-    const cancel = () => controller.abort();
-    res.once('close', cancel);
-    try {
+    await withTextRequest('improve-brief', res, async signal => {
       const credentials = await textConnection();
-      if (controller.signal.aborted) return;
-      const content = await requestJsonCompletion(fetchText, credentials, controller.signal, [
+      signal.throwIfAborted();
+      const content = await requestJsonCompletion(fetchText, credentials, signal, [
         'Edit the supplied content brief for a spoken script and return only a JSON object with a string field named "suggestion".',
         'Return a revised brief, not the script, spoken dialogue, a critique, or a list of changes.',
         `Keep the suggestion in the original brief's language and at most ${MAX_SCRIPT_BRIEF_LENGTH} characters.`,
@@ -372,43 +475,38 @@ export function registerScriptGeneration(app: Express, {
       ].join(' '), { contentBrief: input.prompt, style: input.style, speakers: input.speakers }, 4096);
       const suggestion = scriptBriefSuggestionSchema.safeParse(content);
       if (!suggestion.success) throw new Error('Azure OpenAI did not return a usable brief suggestion. Your original brief was not changed.');
-      if (!controller.signal.aborted) res.json(suggestion.data);
-    } finally { res.off('close', cancel); textRequestRunning = false; }
+      signal.throwIfAborted();
+      res.json(suggestion.data);
+    });
   });
 
   app.post('/api/script-generation/generate', async (req, res) => {
     const input = scriptGenerationSchema.parse(req.body);
-    if (textRequestRunning || runs.active) { res.status(409).json({ error: 'An Azure text request is already running. Wait for it to finish.' }); return; }
-    textRequestRunning = true;
-    const controller = new AbortController();
-    const cancel = () => controller.abort();
-    res.once('close', cancel);
-    try {
+    await withTextRequest('generate', res, async signal => {
       const { locales: selected, generate } = await prepare(input);
-      if (controller.signal.aborted) return;
+      signal.throwIfAborted();
       const stream = req.get('Accept') === SCRIPT_PROGRESS_CONTENT_TYPE;
       if (stream) {
         res.set({ 'Content-Type': `${SCRIPT_PROGRESS_CONTENT_TYPE}; charset=utf-8`, 'Cache-Control': 'no-store' });
         res.flushHeaders();
       }
       const results: ScriptGenerationResult = [];
-      for (let index = 0; index < selected.length && !controller.signal.aborted; index += 3) {
+      for (let index = 0; index < selected.length && !signal.aborted; index += 3) {
         results.push(...await Promise.all(selected.slice(index, index + 3).map(async locale => {
           let result: ScriptGenerationResult[number];
-          try { result = { script: await generate(locale, controller.signal) }; }
+          try { result = { script: await generate(locale, signal) }; }
           catch (error) {
             result = { locale: locale.value, error: connection.redact(error),
               ...(stream && error instanceof RetryableScriptError ? { retryAfterMs: error.retryAfterMs } : {}) };
           }
-          if (stream && !controller.signal.aborted) res.write(`${JSON.stringify(result)}\n`);
+          if (stream && !signal.aborted) res.write(`${JSON.stringify(result)}\n`);
           return result;
         })));
       }
-      if (!controller.signal.aborted) {
-        if (stream) res.end();
-        else res.json(results);
-      }
-    } finally { res.off('close', cancel); textRequestRunning = false; }
+      signal.throwIfAborted();
+      if (stream) res.end();
+      else res.json(results);
+    });
   });
 
   app.post('/api/script-generation/save', async (req, res) => {
