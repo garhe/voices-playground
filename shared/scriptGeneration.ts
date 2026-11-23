@@ -53,6 +53,35 @@ function uniqueLocales(locales: string[]): boolean {
   return new Set(locales.map(locale => locale.toLowerCase())).size === locales.length;
 }
 
+export function scriptBriefFormat(brief: string): { speakers?: 1 | 2; utteranceCount?: number; error?: string } {
+  const speakers = new Set<number>();
+  const utterances = new Set<number>();
+  const count = (token: string) => /^one$/i.test(token) ? 1 : /^two$/i.test(token) ? 2 : Number(token);
+  for (const raw of brief.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:#{1,6}\s+|[-*]\s+|\d+[.)]\s+)/, '').replace(/\*\*/g, '').trim();
+    const speakerLabel = /^(?:number of speakers|speaker count|speakers?)\s*:\s*(\d+|one|two)(?:\s+speakers?)?[.!]?\s*$/i.exec(line);
+    if (speakerLabel) speakers.add(count(speakerLabel[1]));
+    for (const match of line.matchAll(/(?:^|[.!?:;]\s+)(?:use|write|generate|create|return)\s+(?:exactly\s+)?(?:(?:a|an)\s+)?(\d+|one|two)(?:[- ]speakers?\s+(?:dialogue|script|conversation)\b|\s+speakers?(?=\s*(?:[.,;:!?]|$)))/gi))
+      speakers.add(count(match[1]));
+
+    const utteranceLabel = /^(?:number of utterances|utterance count|utterances(?: per locale)?|total utterances)\s*:\s*(\d+)[.!]?\s*$/i.exec(line);
+    if (utteranceLabel) utterances.add(Number(utteranceLabel[1]));
+    for (const match of line.matchAll(/(?:^|[.!?:;]\s+)(?:write|generate|create|return|produce)\s+(?:exactly\s+)?(\d+)\s+(?:utterances?|turns?)(?:\s+(?:total|in total|per locale))?(?=\s*(?:[.;:!?]|$))/gi))
+      utterances.add(Number(match[1]));
+    const total = /\b(\d+)\s+utterances?\s+(?:in\s+)?total[.!]?\s*$/i.exec(line);
+    if (total && !/\b(?:at least|at most|up to|no more than)\b/i.test(line)) utterances.add(Number(total[1]));
+  }
+  if (speakers.size > 1 || utterances.size > 1)
+    return { error: 'The content brief specifies conflicting counts. Give one speaker count and one utterance total per locale.' };
+  const speaker = [...speakers][0];
+  const utteranceCount = [...utterances][0];
+  if (speaker !== undefined && speaker !== 1 && speaker !== 2)
+    return { error: 'The content brief must request 1 or 2 speakers.' };
+  if (utteranceCount !== undefined && (utteranceCount < 1 || utteranceCount > MAX_SCRIPT_UTTERANCES))
+    return { error: `The content brief must request between 1 and ${MAX_SCRIPT_UTTERANCES} utterances per locale.` };
+  return { speakers: speaker, utteranceCount };
+}
+
 export const scriptGenerationSchema = z.object({
   locales: z.array(localeSchema).min(1, 'Select at least one language / accent.')
     .refine(uniqueLocales, 'Locales must be unique.'),
@@ -63,7 +92,20 @@ export const scriptGenerationSchema = z.object({
   expressionTags: z.boolean().optional(),
   expressionTagLists: expressionTagListsSchema.optional(),
   consent: z.literal(true),
-}).strict().refine(value => value.utteranceCount >= value.speakers, 'Provide at least one utterance per speaker.');
+}).strict().transform((value, ctx) => {
+  const format = scriptBriefFormat(value.prompt);
+  if (format.error) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: format.error });
+    return z.NEVER;
+  }
+  const speakers = format.speakers ?? value.speakers;
+  const utteranceCount = format.utteranceCount ?? value.utteranceCount;
+  if (utteranceCount < speakers) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['utteranceCount'], message: 'Provide at least one utterance per speaker.' });
+    return z.NEVER;
+  }
+  return { ...value, speakers, utteranceCount };
+});
 export type ScriptGenerationRequest = z.infer<typeof scriptGenerationSchema>;
 
 const utteranceSchema = z.object({
@@ -96,7 +138,7 @@ export type ScriptGenerationRun = {
 export type ScriptGenerationStatus = {
   run?: ScriptGenerationRun;
   textBusy: boolean;
-  textRequest?: { id: string; kind: 'improve-brief' | 'generate' | 'script-tags'; cancelling: boolean };
+  textRequest?: { id: string; kind: 'improve-brief' | 'generate' | 'script-tags' | 'recording-script'; cancelling: boolean };
 };
 
 export const scriptExportSchema = z.object({

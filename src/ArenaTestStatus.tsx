@@ -121,7 +121,7 @@ export function ArenaTestStatus({ reports, reportsLoaded, queue, queuePanel, fil
     created: row => row.report && Date.parse(row.report.createdAt), voices: row => row.report?.eligibleVoices,
   });
   const status = (queue
-    ? `${queue.active ? 1 : 0} running · ${queue.waiting.length} queued${queue.paused ? ' · Shared queue paused' : ''}`
+    ? `${queue.active ? 1 : 0} running · ${queue.waiting.length} queued${queue.paused ? ' · Queue paused' : ''}`
     : 'Loading live queue…') + (reportsLoaded ? ` · ${other.filter(report => report.status === 'completed').length} completed` : '');
   return <section className="card arena-card" aria-label="Arena test status">
     <h2>Arena test status</h2>

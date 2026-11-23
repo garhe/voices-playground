@@ -12,7 +12,7 @@ import { createApp } from '../server/app.js';
 import { wav } from '../server/audio.js';
 import { BatchImport } from '../server/batch.js';
 import { decodeStudioText, parseStudioScript } from '../server/studioScripts.js';
-import { AzureVoicesStudio } from '../server/studio.js';
+import { AzureVoicesStudio, exactStudioSsmlForAudios } from '../server/studio.js';
 import { Store } from '../server/store.js';
 import { AzureVoicesStudio as Studio } from '../src/AzureVoicesStudio.js';
 import { studioExpressionMarkup, studioSsml } from '../shared/studioSsml.js';
@@ -564,14 +564,19 @@ test('studio API previews without billing, synthesizes, imports and safely skips
     assert.equal(synthCalls, 5);
     assert.ok(bodies.every(body => body.includes('<lang xml:lang="fr-FR">')));
     assert.ok(bodies.some(body => body.includes('Bonjour &amp; merci')));
+    const exactSsml = await exactStudioSsmlForAudios([completed.cells[0].path]);
+    assert.equal(exactSsml[0], studioSsml(completed.cells[0].voice, completed.cells[0].text, completed.cells[0].locale, input.rate, input.pitch));
     assert.equal((await api('/api/studio/runs', { token: plan.token, consent: true })).status, 400);
     const batch = await new BatchImport().plan({ directory: completed.byLocale });
     assert.equal(batch.tests.length, 2);
     assert.ok(batch.tests.every(item => item.errors.length === 0 && item.languages.includes('fr-FR') && item.files.length === 2));
+    assert.ok(batch.tests.flatMap(item => item.files).every(file =>
+      file.ssml?.startsWith('<speak') && completed.cells.some(cell => cell.path.endsWith(file.path.split(/[\\/]/).pop()!) && cell.text === file.scriptText)));
     assert.deepEqual(new Set(batch.tests.flatMap(item => item.genders)), new Set(['Male', 'Female']));
     const manifest = await readFile(path.join(completed.output, 'manifest.csv'), 'utf8');
     const runJson = await readFile(path.join(completed.output, 'run.json'), 'utf8');
     assert.ok(!manifest.includes('synthetic-speech-key') && !runJson.includes('synthetic-speech-key'));
+    assert.equal(Object.keys(JSON.parse(runJson).audioHashes).length, 4);
     const replay = await api('/api/studio/plan', { ...input, useExisting: true });
     const skipPlan: StudioPlan = await replay.json();
     assert.equal(skipPlan.calls, 0);

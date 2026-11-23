@@ -97,6 +97,35 @@ export class Store {
     const jobs = await Promise.all(names.map(n => this.read<Job>(path.join('jobs', n))));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
+  jobProjections<T>(project: (job: Job) => T) {
+    type Entry = { fingerprint: string; value: T };
+    let cached = new Map<string, Entry>();
+    let pending: Promise<T[]> | undefined;
+    const scan = async () => {
+      const next = new Map<string, Entry>();
+      const names = await readdir(path.join(this.root, 'jobs'));
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
+        const relative = path.join('jobs', name);
+        try {
+          const info = await stat(path.join(this.root, relative), { bigint: true });
+          // On Windows a read can change ctime, even when the file contents did not change.
+          const changeTime = process.platform === 'win32' ? info.birthtimeNs : info.ctimeNs;
+          const fingerprint = `${info.ino}:${info.size}:${info.mtimeNs}:${changeTime}`;
+          const previous = cached.get(name);
+          next.set(name, previous?.fingerprint === fingerprint ? previous : {
+            fingerprint, value: project(await this.read<Job>(relative)),
+          });
+        } catch (error) {
+          if (errorCode(error) !== 'ENOENT') throw error;
+          // A report may be deleted between listing and reading the file.
+        }
+      }
+      cached = next;
+      return [...next.values()].map(entry => entry.value);
+    };
+    return () => pending ??= scan().finally(() => { pending = undefined; });
+  }
   saveJob(job: Job) { return this.save(path.join('jobs', `${job.id}.json`), job, job.id); }
   settings() { return this.read<Settings>('settings.json'); }
   remove(relative: string) { return unlink(path.join(this.root, relative)); }

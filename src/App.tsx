@@ -13,7 +13,7 @@ import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
 import { canManageTest, canRetryUnassessedTest, testHistory, testMetadataSchema, testNameMetadata, testStatusLabel, testTableCsv, TEST_PAGE_SIZE, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
 import { csvCell } from '../shared/csv';
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
-import { TestQueue, queueForWorkspace } from './TestQueue';
+import { TestQueue } from './TestQueue';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { ThemePicker } from './ThemePicker';
 import { RubricEditor } from './RubricEditor';
@@ -37,7 +37,7 @@ import { prepareEvaluationClips } from './evaluation';
 import { EvaluationProgress } from './EvaluationProgress';
 import { useTableSort } from './TableSort';
 
-type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string; arenaProfile?: Profile };
+type Config = Settings & ConnectionStatus & { rubric: string; arenaProfile?: Profile };
 type WorkspaceTab = 'setup' | 'results' | 'sorting' | 'studio' | 'scripts' | 'arena-new' | 'arena-scorecard' | 'arena-details' | 'arena-report';
 const DEFAULT_WORKSPACE_TAB = 'arena-new';
 type History = TestHistory;
@@ -464,12 +464,11 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
   const [recentLimit, setRecentLimit] = useState(RECENT_TEST_BATCH);
   const [job, setJob] = useState<Job>();
   const reportText = (text: string) => mediaText(text, job?.profile.stage ?? profile.stage);
-  const [queue, setQueue] = useState<TestQueueState>();
+  const [queues, setQueues] = useState<Partial<Record<EvaluationWorkspace, TestQueueState>>>({});
   const [showTestList, setShowTestList] = useState(true);
   const [editingTest, setEditingTest] = useState<Job>();
   const [notice, setNoticeValue] = useState('');
   const [noticeWorkspace, setNoticeWorkspace] = useState<EvaluationWorkspace>();
-  const [runtimeNotice, setRuntimeNotice] = useState('');
   const [arenaNotice, setArenaNotice] = useState('');
   const [studioNotice, setStudioNotice] = useState('');
   function setNotice(value: string) {
@@ -482,6 +481,8 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
     setNoticeWorkspace(workspace);
   }
   const [connectionError, setConnectionError] = useState('');
+  const [historyError, setHistoryError] = useState('');
+  const [configurationError, setConfigurationError] = useState('');
   const [progressError, setProgressError] = useState('');
   const [busy, setBusy] = useState('');
   useEffect(() => { onBusyChange?.(!!busy); }, [busy, onBusyChange]);
@@ -518,10 +519,21 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
     catch (error) { setNotice(errorText(error)); }
     finally { busyRef.current = false; setBusy(''); }
   }
+  async function loadQueues(signal?: AbortSignal) {
+    const arena = api<TestQueueState>('/api/queue?workspace=arena', undefined, 'GET', signal);
+    if (arenaMode) return { arena: await arena };
+    const [arenaState, scoring] = await Promise.all([arena, api<TestQueueState>('/api/queue?workspace=scoring', undefined, 'GET', signal)]);
+    return { arena: arenaState, scoring };
+  }
   async function refresh() {
-    const [configuration, list, queueState, presets] = await Promise.all([getConfiguration(), loadHistory(undefined, true), api<TestQueueState>('/api/queue'), api<Rubric[]>('/api/rubrics')]);
-    setConfig({ ...configuration, judges: sortJudges(configuration.judges) }); setHistory(list); setQueue(queueState); setRubrics(presets);
-    if (!arenaMode) setRuntimeNotice(configuration.runtimeError ?? '');
+    const updates = await Promise.allSettled([
+      getConfiguration().then(configuration => setConfig({ ...configuration, judges: sortJudges(configuration.judges) })),
+      loadHistory(undefined, true).then(list => { setHistory(list); setHistoryError(''); }),
+      loadQueues().then(states => { setQueues(states); setConnectionError(''); }),
+      api<Rubric[]>('/api/rubrics').then(setRubrics),
+    ]);
+    const failure = updates.find(update => update.status === 'rejected');
+    if (failure) throw failure.reason;
   }
   async function getConfiguration(signal?: AbortSignal): Promise<Config> {
     const configuration = await api<Config>('/api/config', undefined, 'GET', signal);
@@ -544,7 +556,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
     }
     setJob(queued);
     setHistory(previous => previous.map(entry => entry.id === queued.id ? testHistory(queued) : entry));
-    setWorkspaceNotice(`Retry queued for "${evaluationName(source)}". Tests and retries run one at a time. You can queue retries for other tests; this test can be retried again after it finishes.`, evaluationWorkspace(source));
+    setWorkspaceNotice(`Retry queued for "${evaluationName(source)}". Tests and retries run one at a time in this workspace. You can queue retries for other tests; this test can be retried again after it finishes.`, evaluationWorkspace(source));
     await refresh();
   }
   useEffect(() => {
@@ -554,24 +566,26 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
       return next.length === previous.length ? previous : next;
     });
   }, [history, arenaMode]);
+  useEffect(() => startPolling(loadQueues, states => {
+    setQueues(states);
+    setConnectionError('');
+  }, error => setConnectionError(`Live queue updates interrupted: ${errorText(error)} Reconnecting automatically; your draft is kept.`)), [arenaMode]);
+  useEffect(() => startPolling(signal => loadHistory(signal), list => {
+    setHistory(list);
+    setHistoryError('');
+  }, error => setHistoryError(`Test history could not refresh: ${errorText(error)} Retrying automatically.`), 6000), []);
   useEffect(() => {
-    let initialized = false;
-    return startPolling(async signal => {
-      const [state, list, configuration, presets] = await Promise.all([
-        api<TestQueueState>('/api/queue', undefined, 'GET', signal), loadHistory(signal),
-        initialized && arenaMode ? undefined : getConfiguration(signal),
-        initialized ? undefined : api<Rubric[]>('/api/rubrics', undefined, 'GET', signal),
-      ]);
-      return { state, list, configuration, presets };
-    }, ({ state, list, configuration, presets }) => {
-      if (configuration && presets) {
-        setConfig({ ...configuration, judges: sortJudges(configuration.judges) }); setRubrics(presets); initialized = true;
-        if (arenaMode && configuration.arenaProfile) setProfile(withArenaRubric(configuration.arenaProfile));
-      }
-      if (!arenaMode && configuration) setRuntimeNotice(configuration.runtimeError ?? '');
-      setQueue(state); setHistory(list); setConnectionError('');
-    }, error => setConnectionError(`Local app connection interrupted: ${errorText(error)}. Reconnecting automatically; your draft is kept.`));
-  }, []);
+    const stop = startPolling(signal => Promise.all([
+      getConfiguration(signal), api<Rubric[]>('/api/rubrics', undefined, 'GET', signal),
+    ]), ([configuration, presets]) => {
+      setConfig({ ...configuration, judges: sortJudges(configuration.judges) });
+      setRubrics(presets);
+      if (arenaMode && configuration.arenaProfile) setProfile(withArenaRubric(configuration.arenaProfile));
+      setConfigurationError('');
+      stop();
+    }, error => setConfigurationError(`Evaluation settings could not load: ${errorText(error)} Retrying automatically.`));
+    return stop;
+  }, [arenaMode]);
   useEffect(() => {
     if (!currentFile) { setBuffer(undefined); setSourceUrl(''); setPreviewUrl(''); return; }
     let cancelled = false;
@@ -677,7 +691,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
     if (enqueue || (arenaMode && onStarted)) {
       setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined);
       setProfile(previous => freshProfile(previous));
-      setNotice(`"${name}" submitted to the queue. Prepare the next test; saved tests run one at a time, even if this browser is closed. Keep the server running.`);
+      setNotice(`"${name}" submitted to this workspace's queue. Tests run one at a time here, even if this browser is closed. Keep the server running.`);
       if (!enqueue) await onStarted?.(value);
     } else {
       setJob(value); setShowTestList(false); setTab('results');
@@ -694,6 +708,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
       const file = new File([await response.blob()], source.path.split(/[\\/]/).pop()!);
       const prepared = await prepareEvaluationClips([{
         id: source.id, file, path: source.path, voice: source.voice, language: evaluation.language, regions: [], include: true,
+        ssml: source.ssml, scriptText: source.scriptText,
       }], evaluation, async (clip, pcm) => { await api('/api/clips', { clip, pcm }); },
       message => setBusy(`${test.name} (${index + 1}/${test.files.length}): ${message}`));
       for (const id of prepared) clipIds.push(id);
@@ -836,15 +851,23 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
   const workspaceTitle = tab === 'sorting' ? 'Folder Sorting' : tab === 'studio' ? 'Azure Voices Studio'
     : tab === 'scripts' ? 'Script Generation' : isArena ? `Voice Arena / ${tab === 'arena-new' ? 'New test' : tab === 'arena-details' ? 'Detailed reports' : tab === 'arena-report' ? 'Test report' : 'Scorecard'}` : tab === 'settings' ? 'Azure Settings' : 'Voices Scoring';
   const scoringPage = tab === 'setup' ? 'Evaluation setup' : showTestList ? 'Test Reports' : 'Test details';
-  const queuePanel = (workspace: EvaluationWorkspace) => queue && <TestQueue state={queue} busy={navigationBusy}
-    workspace={workspace} history={history}
-    onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
-    onStart={() => void action('Starting queue', async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); })}
-    onCancel={id => void action('Cancelling test', async () => {
-      await api(`/api/jobs/${id}/cancel`, {});
-      if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
-      await refresh();
-    })} />;
+  const runtimeNotice = (isArena ? queues.arena?.runtimeError : isScoring ? queues.scoring?.runtimeError : undefined) ?? '';
+  async function changeQueue(workspace: EvaluationWorkspace, command: 'pause' | 'start') {
+    const state = await api<TestQueueState>(`/api/queue/${command}?workspace=${workspace}`, command === 'start' ? { consent: true } : {});
+    setQueues(previous => ({ ...previous, [workspace]: state }));
+  }
+  const queuePanel = (workspace: EvaluationWorkspace) => {
+    const queue = queues[workspace];
+    return queue && <TestQueue state={queue} busy={navigationBusy}
+      workspace={workspace}
+      onPause={() => void action('Pausing queue', () => changeQueue(workspace, 'pause'))}
+      onStart={() => void action('Starting queue', () => changeQueue(workspace, 'start'))}
+      onCancel={id => void action('Cancelling test', async () => {
+        await api(`/api/jobs/${id}/cancel`, {});
+        if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
+        await refresh();
+      })} />;
+  };
 
   return <div className={arenaMode ? 'embedded-workbench' : 'app-shell'}>
     {!arenaMode && <aside className="sidebar">
@@ -895,9 +918,12 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
         {tab === 'studio' && studioNotice && <WorkspaceNotice key={`studio:${studioNotice}`} message={studioNotice}
           label="Dismiss Studio notification" onDismiss={() => setStudioNotice('')} />}
         <WorkspaceNotice key={`connection:${connectionError}`} message={connectionError} role="status" label="Dismiss connection notification" />
+        {isScoring && <WorkspaceNotice key={`history:${historyError}`} message={historyError} role="status" label="Dismiss history notification" />}
+        <WorkspaceNotice key={`settings:${configurationError}`} message={configurationError} role="status" label="Dismiss settings notification" />
         <WorkspaceNotice key={`progress:${progressError}`} message={liveStatus === progressError ? progressError : ''} role="status" label="Dismiss report notification" />
       </div>}
       {arenaMode && !onNotice && visibleNotice && <WorkspaceNotice key={notice} message={notice} onDismiss={() => setNotice('')} />}
+      {arenaMode && <WorkspaceNotice key={`settings:${configurationError}`} message={configurationError} role="status" label="Dismiss settings notification" />}
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
       {(isScoring || tab === 'arena-report') && queuePanel(arenaMode || tab === 'arena-report' ? 'arena' : 'scoring')}
       {(isScoring || tab === 'arena-report') && editingTest &&
@@ -946,7 +972,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
       <div hidden={tab !== 'studio'}><AzureVoicesStudio status={speechSettings.value} onError={setStudioNotice} onConfigure={() => openAzureSettings('azure-speech')} /></div>
       <div hidden={!isArena || tab === 'arena-report'}><VoiceArena active={isArena && tab !== 'arena-report'} page={tab === 'arena-new' ? 'new' : tab === 'arena-details' ? 'details' : 'scorecard'} request={api} busy={navigationBusy}
         deletedIds={deletedArenaIds} onDelete={entries => { setConfirmBulk({ action: 'delete', entries, arena: true }); setBulkReport(undefined); setNotice(''); }}
-        queue={tab === 'arena-details' && queue ? queueForWorkspace(queue, history, 'arena').state : undefined}
+        queue={tab === 'arena-details' ? queues.arena : undefined}
         queuePanel={tab === 'arena-details' ? queuePanel('arena') : undefined}
         onPageChange={page => setTab(page === 'details' ? 'arena-details' : page === 'new' ? 'arena-new' : 'arena-scorecard')}
         newTest={<EvaluationWorkbench arenaMode onConfigure={openAzureSettings} onBusyChange={setArenaBusy} onNotice={setArenaNotice} connectionStatus={config}
@@ -1034,7 +1060,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
               updateLanguageAccent(locale); setArenaSinglePreview(preview);
             })}>Preview script matching</button>
             {arenaSinglePreview && <p role="status">Ready: {arenaSinglePreview.tests[0].arena.domain} · {arenaSinglePreview.tests[0].arena.locale} · {arenaFiles.length} audio inputs.</p>}</>}
-          <p className="hint">Arena uses the same upload, listening-window preparation, speaker-range review, evaluation queue and reports as Voices Scoring. Arena keeps its own draft, panel and rubric. Voice/model comparisons use TTS single-speaker scoring.</p>
+          <p className="hint">Arena uses the same audio preparation and reports as Voices Scoring, but has its own queue, draft, panel and rubric. Voice/model comparisons use TTS single-speaker scoring.</p>
         </section>}
         <div className="setup-grid" data-evaluation-open={evaluationOpen} data-panel-open={panelOpen}>
           <details className="card setup-section" open={evaluationOpen} data-step="evaluation" onToggle={event => setEvaluationOpen(event.currentTarget.open)}><summary><span>{arenaMode ? '01 · Evaluation settings' : '01 · Choose your evaluation'}</span><small>{testType(profile.stage)} · {setupMode === 'batch' ? 'Per-folder locale' : displayLanguageHint(profile.language)}</small></summary><div className="setup-section-content">
@@ -1228,7 +1254,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
           onDownload={(entry, kind) => void action('Preparing report download', () => downloadReports(entry, kind))}
           onRegenerate={entry => void action('Regenerating saved reports', () => openTest(entry, true))}
           onRefresh={() => void action('Refreshing tests', refresh)} /></div>}
-        {(tab === 'arena-report' ? !!job?.arena : !job?.arena) && <div hidden={showTestList}>
+        {(tab === 'arena-report' ? !!job?.arena : !job?.arena) && <div hidden={showTestList} className={tab === 'arena-report' ? 'arena-full-report' : undefined}>
         {tab === 'arena-report' && <button className="secondary" onClick={() => setTab(arenaReturnTab)}>Back to {arenaReturnTab === 'arena-details' ? 'detailed reports' : arenaReturnTab === 'arena-new' ? 'new test' : 'scorecard'}</button>}
         <div className="page-title"><div><p className="eyebrow">EVIDENCE, NOT JUST A LEADERBOARD</p><h1>{job ? evaluationName(job) : 'Voice comparison'}</h1><p className="muted">Voice comparison · Different content and languages can affect results.</p>{job && <p className="hint">{new Date(job.createdAt).toLocaleString()} · ID: {job.id}</p>}</div>
           <div className="button-row">{job && <><button className="secondary" onClick={() => exportCsv(job)}>Export CSV</button><button className="secondary" onClick={() => exportVoiceEvidenceCsv(job)}>Export voice summaries</button><button className="secondary" onClick={() => exportReportJson(job)}>Export JSON</button></>}</div></div>
@@ -1251,12 +1277,12 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
             <div className="section-with-action"><h2>{job.status === 'completed' ? 'Completed* — not all files were fully assessed' : 'Files needing assessment'}</h2>
               <button className="secondary" disabled={retryBlocked} title={retryHint} onClick={() => void action('Queueing unassessed-input retry', () =>
                 enqueueRetry(job, { retryUnassessed: true }))}>Retry all unassessed files</button></div>
-            <p className="hint">{unassessedFiles.length} file{unassessedFiles.length === 1 ? ' has' : 's have'} missing, failed, unassessable or partial judge results. Retrying queues only the affected inputs/judges for Azure and incurs new usage. Tests and retries run one at a time; each test can have one pending retry. Successful judge results are preserved, and previous attempts remain in the audit history. A retry may still be unassessable; it does not force a score.</p>
+            <p className="hint">{unassessedFiles.length} file{unassessedFiles.length === 1 ? ' has' : 's have'} missing, failed, unassessable or partial judge results. Retrying queues only the affected inputs/judges for Azure and incurs new usage. Tests and retries run one at a time in this workspace; each test can have one pending retry. Successful judge results are preserved, and previous attempts remain in the audit history. A retry may still be unassessable; it does not force a score.</p>
             <details className="assessment-explanation"><summary>Why can audio have duration but report no speech or an unknown language?</summary>
               <p>Duration measures the length of the saved audio, not the presence of speech or of the requested speaker. Quiet-sample measurements are not speech detection.</p>
               {job.profile.speakerMode === 'automatic' && <p>In automatic-role mode, “no speech from the requested role” can mean the judge did not identify that role, even when another speaker is audible. Role attribution is a model judgment and can be wrong.</p>}
               <p>{reportText('“Unknown” means the judge did not reliably identify the language for that assessment; it does not prove that the recording has no identifiable language. Limited speech, role uncertainty, audio quality or a model/audio-delivery error are possible explanations, not confirmed causes.')}</p>
-              <p>{reportText('Listen to the exact saved input in “Voice top issues & judge evidence.” The language hint is guidance, not verified language detection. Use Export JSON for saved upload and token diagnostics; they cannot prove the model heard the recording correctly.')}</p>
+              <p>{reportText('Listen to the exact saved input in “All recordings per voice.” The language hint is guidance, not verified language detection. Use Export JSON for saved upload and token diagnostics; they cannot prove the model heard the recording correctly.')}</p>
               <p>If you want to assess a single voice regardless of agent/customer meaning, use Edit inputs and choose Single speaker for a new test. Existing judgments are not changed.</p>
             </details>
             {retryBlocked && <p className="hint">{retryHint}</p>}
@@ -1293,7 +1319,7 @@ export function EvaluationWorkbench({ arenaMode = false, onConfigure, onBusyChan
           <VoiceJudgeMatrix job={job} voices={voiceEvidence} />
           <VoiceDescriptorReport job={job} />
           {job.profile.stage !== 'tts' && <VoiceImprovement job={job} voices={voiceDirectorBriefs(job)} />}
-          <VoiceEvidenceTree job={job} />
+          <VoiceEvidenceTree job={job} compact={tab === 'arena-report'} />
         </>}
         </div>}
       </>}

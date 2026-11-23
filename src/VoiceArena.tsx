@@ -169,6 +169,7 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
         {!scoreDomains.length && <p>No matching domains. Use New test to populate the scorecard or clear the domain filter.</p>}
       </section>
       {scoreDomains.map(domain => <ArenaScoreMatrix key={domain} domain={domain} busy={busy}
+        sharedDomains={domainFilter.length ? scoreDomains : []}
         cells={scoreCells.filter(cell => cell.domain === domain)}
         locales={[...new Set(data.cells.filter(cell => cell.domain === domain && matchesFilter(language, locale => cell.locale === locale)).map(cell => cell.locale))].sort()}
         load={id => request<Job>(`/api/jobs/${id}`, undefined, 'GET', AbortSignal.timeout(15_000))}
@@ -195,6 +196,7 @@ export function VoiceArena({ active, page = 'scorecard', request, busy, onOpen, 
           </select></label>
         </div>
         {page === 'details' && matchingCells.length > 0 && <ArenaDimensionComparison cells={comparisonCells} busy={busy} view={comparisonView}
+          load={id => request<Job>(`/api/jobs/${id}`, undefined, 'GET')}
           loadingDimensions={pendingDimensionIds !== '[]' && !dimensionError} dimensionError={dimensionError} onInspect={cell => {
           setInspectedKey(arenaDetailKey(cell));
           reportTarget.current?.focus({ preventScroll: true });

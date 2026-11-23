@@ -65,7 +65,7 @@ export const DEFAULT_RUBRIC: Rubric = {
     weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
   })),
 };
-export const ARENA_TEST_GUIDE = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones) and **script fidelity** against the supplied reference script (any words, names, numbers or phrases skipped, cut off, substituted or repeated, any speech added that is not in the script, and bracketed style tags read aloud), **naturalness** (human-like prosody without robotic, flat or glitchy delivery, and **one consistent speaker identity**: no point within an utterance where the voice changes timbre, pitch register, apparent age or gender, or accent so that it sounds like a different person) and **emotion & speaking style** (an appropriate, consistent, warm and professional tone for the domain, and each segment conveying the style its bracketed tag requests, e.g. [reassuring] or [hesitant]). Give detailed, audio-specific reasons for every score and say where each issue occurs.';
+export const ARENA_TEST_GUIDE = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones) and **script fidelity** against the supplied reference script (any words, names, numbers or phrases skipped, cut off, substituted or repeated, any speech added that is not in the script, and bracketed style tags read aloud), **naturalness** (human-like prosody without robotic, flat or glitchy delivery, and **one consistent speaker identity**: no point within an utterance where the voice changes timbre, pitch register, apparent age or gender, or accent so that it sounds like a different person) and **emotion & speaking style** (a warm, professional tone that fits the domain and script content, consistent throughout and judged from how the voice sounds, not the words; for every script, tagged or not. Where bracketed tags like [reassuring] or [hesitant] appear, each tagged segment must also audibly convey that style). Give detailed, audio-specific reasons for every score and say where each issue occurs.';
 /** Unedited revision-1 Arena guide, kept so saved profiles that still use it can move to the current built-in guide. */
 export const LEGACY_ARENA_TEST_GUIDE_V1 = 'This Voice Arena test compares synthetic TTS voices and voice models reading the same script in the locale named by the script. You will hear one synthetic speaker per audio file. **Evaluate only this voice’s audible delivery** against a natural, authentic native speaker of the target locale in a real-world call center. Probe in detail: **accent** fit to the target locale, **pronunciation accuracy** (audibly mispronounced, slurred, garbled or wrong-language words and wrong lexical tones; no reference script is provided, so do not judge omissions or whether content matches the script), **naturalness** (human-like prosody without robotic, flat or glitchy delivery) and **emotion & speaking style** (an appropriate, consistent, warm and professional emotional tone for the domain). Give detailed, audio-specific reasons for every score.';
 const LEGACY_ARENA_V1_TEXT = {
@@ -174,6 +174,8 @@ export const clipSchema = z.object({
   end: z.number().positive(),
   channel: z.enum(['mix', 'left', 'right']),
   language: languageHintSchema,
+  ssml: z.string().max(32_767).optional(),
+  referenceScript: z.string().max(20_000).optional(),
 }).refine(c => c.end > c.start && c.end - c.start <= MAX_SECONDS + 0.001, {
   message: `Select a region longer than 0 and no longer than ${MAX_SECONDS} seconds.`,
 });
@@ -183,8 +185,8 @@ export function rolesForScope(scope: Profile['scope']): Clip['role'][] {
 }
 export type Technical = { peakDb: number | null; rmsDb: number | null; clippingPercent: number; quietPercent: number; seconds: number };
 /**
- * referenceScript is the Arena script text the TTS voice was asked to speak for the whole audio file. It is set only when
- * the file's clips cover it from 0 s in back-to-back windows; a long file's windows all carry the full script.
+ * referenceScript is retained source text, not a transcript. Arena sets it only when the file's clips cover the script
+ * from 0 s in back-to-back windows; verified Studio imports can also attach the exact source line.
  */
 export type SpeechCheck = {
   status: 'completed';
@@ -192,7 +194,7 @@ export type SpeechCheck = {
     | { status: 'unavailable'; reason: string };
   speaker: { status: 'possible_change' | 'no_change_detected' | 'unavailable'; segments: number };
 } | { status: 'failed'; error: string };
-export type StoredClip = Clip & { technical: Technical; referenceScript?: string; speechCheck?: SpeechCheck };
+export type StoredClip = Clip & { technical: Technical; speechCheck?: SpeechCheck };
 /** Position of one window within a long audio file that shares a single reference script (index is 1-based). */
 export type ReferenceWindow = { index: number; count: number; start: number; end: number };
 const WINDOW_GAP_SECONDS = 0.05;
@@ -320,7 +322,7 @@ export type QueuedTest = {
 };
 export type TestQueueState = {
   paused: boolean; active?: QueuedTest;
-  waiting: QueuedTest[]; error?: string; recoveringSave?: boolean;
+  waiting: QueuedTest[]; error?: string; recoveringSave?: boolean; runtimeError?: string;
   eta?: { currentMinutes?: number; batchMinutes?: number };
 };
 export function evaluationName(value: { name?: string }): string {

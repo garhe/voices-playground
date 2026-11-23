@@ -4,7 +4,7 @@ import path from 'node:path';
 import { z, ZodError } from 'zod';
 import {
   clipSchema, clipScopeError, referenceWindow, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
-  type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs, evaluationWorkspace,
+  type Job, type Profile, type StoredClip, type TestQueueState, type EvaluationWorkspace, type JudgeResult, unassessedInputs, evaluationWorkspace,
   rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, ARENA_RUBRIC, BUILT_IN_RUBRIC_IDS, DEFAULT_JUDGE_DEPLOYMENTS, type Rubric,
 } from '../shared/domain.js';
 import { measurements, wav } from './audio.js';
@@ -19,7 +19,7 @@ import { registerStudio } from './studio.js';
 import { speechCheck } from './speechCheck.js';
 import { registerScriptGeneration } from './scriptGeneration.js';
 import { ArenaImport } from './arena.js';
-import { arenaData, arenaReferenceSchema, arenaSettingsSchema } from '../shared/arena.js';
+import { mergeArenaReports, summarizeArenaReport, arenaReferenceSchema, arenaSettingsSchema } from '../shared/arena.js';
 import { renderShareScorecard } from './shareScorecard.js';
 import { validThemeSelection } from '../src/theme.js';
 
@@ -133,85 +133,106 @@ export async function createApp(options: {
   }
   const app = express();
   app.disable('x-powered-by');
-  let active: { job: Job; controller: AbortController } | undefined;
-  let activeTiming: { rate: QueueTiming; selected: JudgeResult[] } | undefined;
-  const waiting = savedJobs.filter(job => job.status === 'queued')
-    .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.createdAt.localeCompare(b.createdAt));
-  let queuePaused = waiting.length > 0;
-  let queueError: string | undefined;
-  let saveRecovery: { jobId: string; detail: string; attempts: number; memoryOnly: boolean } | undefined;
-  let saveRetryTimer: ReturnType<typeof setTimeout> | undefined;
-  let dispatching = false;
-  let queuedWrites = 0;
+  type Queue = {
+    active?: { job: Job; controller: AbortController };
+    activeTiming?: { rate: QueueTiming; selected: JudgeResult[] };
+    waiting: Job[];
+    paused: boolean;
+    error?: string;
+    runtimeError?: string;
+    saveRecovery?: { jobId: string; detail: string; attempts: number; memoryOnly: boolean };
+    saveRetryTimer?: ReturnType<typeof setTimeout>;
+    dispatching: boolean;
+    queuedWrites: number;
+  };
+  const queueOrderCompare = (a: Job, b: Job) =>
+    (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.createdAt.localeCompare(b.createdAt);
+  function createQueue(workspace: EvaluationWorkspace): Queue {
+    const waiting = savedJobs.filter(job => job.status === 'queued' && evaluationWorkspace(job) === workspace).sort(queueOrderCompare);
+    return { waiting, paused: waiting.length > 0, dispatching: false, queuedWrites: 0 };
+  }
+  const queues = { scoring: createQueue('scoring'), arena: createQueue('arena') };
+  const allQueues = Object.values(queues);
+  const queueForJob = (job: Job) => queues[evaluationWorkspace(job)];
+  const findActive = (id: string) => allQueues.find(queue => queue.active?.job.id === id)?.active;
+  const findWaiting = (id: string) => allQueues.find(queue => queue.waiting.some(job => job.id === id));
+  const allWaiting = () => allQueues.flatMap(queue => queue.waiting).sort(queueOrderCompare);
+  const hasWork = (queue: Queue) => queue.active || queue.dispatching || queue.queuedWrites || queue.waiting.length;
   const changingJobs = new Set<string>();
-  let runtimeError: string | undefined;
   const evaluate = options.evaluate ?? judgeAudio;
   const testConnection = options.testConnection ?? testRealtimeConnection;
   let connectionWrite = false;
   let testingConnection = false;
-  function queueState(): TestQueueState {
+  const queuedTest = (job: Job) => ({
+    id: job.id, name: evaluationName(job), workspace: evaluationWorkspace(job),
+    retry: job.retrySelection ? true : undefined, autoRetryCount: job.autoRetryCount,
+  });
+  function queueState(queue: Queue): TestQueueState {
+    const { active, activeTiming, waiting, paused, error, saveRecovery, runtimeError } = queue;
     const current = activeTiming?.selected.filter(result => result.status === 'pending' || result.status === 'running').length ?? 0;
-    const queued = activeTiming && !queuePaused ? waiting.reduce((count, job) =>
+    const queued = activeTiming && !paused ? waiting.reduce((count, job) =>
       count + evaluationResults(job).filter(result => result.status !== 'completed').length, 0) : 0;
     return {
-      paused: queuePaused,
-      error: queueError ?? (saveRecovery ? `${saveRecovery.detail} ${queuePaused
+      paused, runtimeError,
+      error: error ?? (saveRecovery ? `${saveRecovery.detail} ${paused
         ? 'Automatic save retry is paused. Select Start queue to continue.'
         : 'Retrying the local save automatically. No later test will start before this one.'}` : undefined),
-      recoveringSave: !!saveRecovery && !queuePaused && !queueError,
-      eta: activeTiming?.rate.minutesLeft(performance.now(), current, queued, queuePaused) ?? {},
-      active: active ? { id: active.job.id, name: evaluationName(active.job), workspace: evaluationWorkspace(active.job), retry: active.job.retrySelection ? true : undefined, autoRetryCount: active.job.autoRetryCount } : undefined,
-      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), workspace: evaluationWorkspace(job), retry: job.retrySelection ? true : undefined, autoRetryCount: job.autoRetryCount })),
+      recoveringSave: !!saveRecovery && !paused && !error,
+      eta: activeTiming?.rate.minutesLeft(performance.now(), current, queued, paused) ?? {},
+      active: active && queuedTest(active.job),
+      waiting: waiting.map(queuedTest),
     };
   }
-  function clearSaveRetryTimer() {
-    clearTimeout(saveRetryTimer);
-    saveRetryTimer = undefined;
+  function clearSaveRetryTimer(queue: Queue) {
+    clearTimeout(queue.saveRetryTimer);
+    queue.saveRetryTimer = undefined;
   }
   function retryQueueSave(job: Job, error: unknown, checkpoint?: 'saved' | 'memory-only') {
-    const previous = saveRecovery?.jobId === job.id ? saveRecovery : undefined;
+    const queue = queueForJob(job);
+    const previous = queue.saveRecovery?.jobId === job.id ? queue.saveRecovery : undefined;
     const attempts = (previous?.attempts ?? 0) + 1;
     const memoryOnly = checkpoint === undefined ? previous?.memoryOnly ?? false : checkpoint === 'memory-only';
     const detail = `Could not save "${evaluationName(job)}": ${connection.redact(error)}.${
       memoryOnly ? ' The latest checkpoint is in memory; keep the server running.' : ''}`;
-    saveRecovery = { jobId: job.id, detail, attempts, memoryOnly };
+    queue.saveRecovery = { jobId: job.id, detail, attempts, memoryOnly };
     console.warn(detail);
     if (!previous) void store.recordQueueSaveRetry(job.id, checkpoint ? { phase: 'running', checkpoint } : { phase: 'starting' });
-    if (queuePaused) return;
-    clearSaveRetryTimer();
+    if (queue.paused) return;
+    clearSaveRetryTimer(queue);
     const delay = Math.min((options.saveRetryDelayMs ?? 5000) * 2 ** Math.min(attempts - 1, 3), 30000);
-    saveRetryTimer = setTimeout(() => {
-      saveRetryTimer = undefined;
-      void drainQueue();
+    queue.saveRetryTimer = setTimeout(() => {
+      queue.saveRetryTimer = undefined;
+      void drainQueue(queue);
     }, delay);
-    saveRetryTimer.unref();
+    queue.saveRetryTimer.unref();
   }
-  async function drainQueue() {
-    if (active || dispatching || queuedWrites || queuePaused || saveRetryTimer || !waiting.length) return;
-    dispatching = true;
+  async function drainQueue(queue: Queue) {
+    const { waiting, saveRecovery } = queue;
+    if (queue.active || queue.dispatching || queue.queuedWrites || queue.paused || queue.saveRetryTimer || !waiting.length) return;
+    queue.dispatching = true;
     let next: Job | undefined;
     try {
       const credentials = connection.current();
       const recoveryIndex = saveRecovery ? waiting.findIndex(job => job.id === saveRecovery?.jobId) : -1;
       [next] = waiting.splice(Math.max(0, recoveryIndex), 1);
       const controller = new AbortController();
-      next.status = 'running'; active = { job: next, controller };
+      next.status = 'running'; queue.active = { job: next, controller };
       await store.saveJob(next);
-      if (saveRecovery?.jobId === next.id) saveRecovery = undefined;
+      if (saveRecovery?.jobId === next.id) queue.saveRecovery = undefined;
       void run(next, controller, credentials);
     } catch (error) {
       if (next) {
-        next.status = 'queued'; waiting.unshift(next); active = undefined;
+        next.status = 'queued'; waiting.unshift(next); queue.active = undefined;
         if (next.autoRetry) {
           retryQueueSave(next, error);
           return;
         }
         void store.recordSavePause(next.id, { phase: 'starting' });
       }
-      queuePaused = true;
-      queueError = `Queue paused: ${connection.redact(error)}. Resolve the problem and start the queue again.`;
-      console.error(queueError);
-    } finally { dispatching = false; }
+      queue.paused = true;
+      queue.error = `Queue paused: ${connection.redact(error)}. Resolve the problem and start the queue again.`;
+      console.error(queue.error);
+    } finally { queue.dispatching = false; }
   }
   function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips' | 'autoRetry'>, enqueue: boolean): Job {
     const clips = input.clips.map(({ speechCheck: _speechCheck, ...clip }) => clip);
@@ -224,18 +245,19 @@ export async function createApp(options: {
       results: clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
   }
-  const firstQueueOrder = () => Math.min(0, ...waiting.map(queued => queued.queueOrder ?? 0)) - 1;
+  const firstQueueOrder = (queue: Queue) => queue.waiting.reduce((min, job) => Math.min(min, job.queueOrder ?? 0), 0) - 1;
   async function saveEvaluation(job: Job) {
     try { await store.saveJob(job); }
     catch (error) { throw new EvaluationSaveError(error); }
   }
   async function enqueueEvaluation(job: Job, first = false) {
-    job.queueOrder = first ? firstQueueOrder() : ++queueOrder;
+    const queue = queueForJob(job);
+    job.queueOrder = first ? firstQueueOrder(queue) : ++queueOrder;
     await saveEvaluation(job);
-    waiting.push(job); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!);
+    queue.waiting.push(job); queue.waiting.sort(queueOrderCompare);
   }
   function ensureChangeable(id: string) {
-    if (active?.job.id === id || waiting.some(job => job.id === id) || changingJobs.has(id))
+    if (findActive(id) || findWaiting(id) || changingJobs.has(id))
       throw new Error('This test is running, queued or being changed. Cancel a waiting test or wait for it to finish.');
   }
   async function deleteEvaluation(id: string) {
@@ -265,10 +287,14 @@ export async function createApp(options: {
   const arenaImport = new ArenaImport();
   const studio = await registerStudio(app, store, options.speechFetch);
   registerScriptGeneration(app, { connection, store, studio, defaultDeployment: options.scriptDeployment, fetchText: options.scriptFetch });
-  app.get('/api/arena', async (_req, res) => res.json(arenaData(await store.jobs())));
+  const loadReportSummaries = store.jobProjections(job => ({
+    history: testHistory(job), arena: summarizeArenaReport(job),
+  }));
+  const loadArenaReports = async () => mergeArenaReports((await loadReportSummaries()).map(item => item.arena));
+  app.get('/api/arena', async (_req, res) => res.json(await loadArenaReports()));
   app.get('/api/arena/share-scorecard', async (req, res) => {
     const theme = z.string().refine(validThemeSelection, 'Unknown workspace theme.').optional().parse(req.query.theme);
-    const { cells } = arenaData(await store.jobs());
+    const { cells } = await loadArenaReports();
     if (!cells.length) {
       res.status(409).json({ error: 'No fully assessed Arena results are available to share.' });
       return;
@@ -297,7 +323,7 @@ export async function createApp(options: {
   app.post('/api/folders/preview', async (req, res) => res.json(await folderSorting.plan(req.body)));
   app.post('/api/folders/apply', async (req, res) => res.json(await folderSorting.apply(req.body)));
   app.get('/api/config', async (_req, res) => res.json({
-    ...await store.settings(), ...connection.status(), runtimeError, rubric: RUBRIC_VERSION,
+    ...await store.settings(), ...connection.status(), runtimeError: queues.scoring.runtimeError, rubric: RUBRIC_VERSION,
   }));
   app.get('/api/rubrics', (_req, res) => res.json([DEFAULT_RUBRIC, ...rubrics]));
   app.post('/api/rubrics', async (req, res) => {
@@ -412,13 +438,18 @@ export async function createApp(options: {
     res.send(audio);
   });
   app.get('/api/jobs', async (_req, res) => {
-    const jobs = await store.jobs();
-    const queued = new Map(waiting.map(job => [job.id, job]));
-    res.json(jobs.map(j => testHistory(active?.job.id === j.id ? active.job : queued.get(j.id) ?? j)));
+    const reports = await loadReportSummaries();
+    const queued = new Map(allWaiting().map(job => [job.id, job]));
+    res.json(reports.map(({ history }) => {
+      const live = findActive(history.id)?.job;
+      if (live) return testHistory(live);
+      return queued.has(history.id) && history.status !== 'queued' ? { ...history, status: 'queued' } : history;
+    }).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
   });
   app.post('/api/jobs/bulk', async (req, res) => {
     const input = bulkJobRequest.parse(req.body);
-    if (input.action === 'redo') { connection.current(); queuedWrites++; }
+    if (input.action === 'redo') connection.current();
+    const writing = new Set<Queue>();
     const result: BulkTestResult = { succeeded: [], failed: [] };
     try {
       for (const id of input.ids) {
@@ -432,6 +463,8 @@ export async function createApp(options: {
           changingJobs.add(id);
           try {
             const source = await store.read<Job>(path.join('jobs', `${id}.json`));
+            const queue = queueForJob(source);
+            if (!writing.has(queue)) { writing.add(queue); queue.queuedWrites++; }
             if (!canManageTest(source)) throw new Error('This test is running or queued. Wait or cancel it before redoing.');
             const profile = profileSchema.parse(source.profile);
             const { judges } = settingsSchema.parse({ judges: source.judges });
@@ -456,24 +489,39 @@ export async function createApp(options: {
       }
       res.json(result);
     } finally {
-      if (input.action === 'redo') queuedWrites--;
-      void drainQueue();
+      for (const queue of writing) { queue.queuedWrites--; void drainQueue(queue); }
     }
   });
-  app.get('/api/queue', (_req, res) => res.json(queueState()));
-  app.post('/api/queue/pause', (_req, res) => {
-    queuePaused = true; clearSaveRetryTimer(); res.json(queueState());
+  const queueWorkspace = z.enum(['scoring', 'arena']).optional();
+  function queueResponse(workspace?: EvaluationWorkspace): TestQueueState {
+    if (workspace) return queueState(queues[workspace]);
+    // Keep the unscoped API for existing local scripts; workspace views always request a specific queue.
+    const states = allQueues.map(queueState);
+    const primary = states.find(state => state.active) ?? states.find(state => state.error) ?? states[0];
+    return { ...primary, paused: states.some(state => state.paused), waiting: allWaiting().map(queuedTest) };
+  }
+  app.get('/api/queue', (req, res) => res.json(queueResponse(queueWorkspace.parse(req.query.workspace))));
+  app.post('/api/queue/pause', (req, res) => {
+    const workspace = queueWorkspace.parse(req.query.workspace);
+    for (const queue of workspace ? [queues[workspace]] : allQueues) {
+      queue.paused = true; clearSaveRetryTimer(queue);
+    }
+    res.json(queueResponse(workspace));
   });
   app.post('/api/queue/start', async (req, res) => {
     z.object({ consent: z.literal(true) }).parse(req.body);
+    const workspace = queueWorkspace.parse(req.query.workspace);
     connection.current();
-    clearSaveRetryTimer();
-    queuePaused = false; queueError = undefined;
-    await drainQueue(); res.json(queueState());
+    await Promise.all((workspace ? [queues[workspace]] : allQueues).map(queue => {
+      clearSaveRetryTimer(queue);
+      queue.paused = false; queue.error = undefined;
+      return drainQueue(queue);
+    }));
+    res.json(queueResponse(workspace));
   });
   app.get('/api/jobs/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    res.json(active?.job.id === id ? active.job : waiting.find(job => job.id === id) ?? await store.read<Job>(path.join('jobs', `${id}.json`)));
+    res.json(findActive(id)?.job ?? findWaiting(id)?.waiting.find(job => job.id === id) ?? await store.read<Job>(path.join('jobs', `${id}.json`)));
   });
   app.get('/api/jobs/:id/draft', async (req, res) => {
     const id = uuid.parse(req.params.id);
@@ -484,7 +532,7 @@ export async function createApp(options: {
   app.patch('/api/jobs/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
     const metadata = testMetadataSchema.parse(req.body);
-    if (active?.job.id === id || waiting.some(job => job.id === id) || changingJobs.has(id)) {
+    if (findActive(id) || findWaiting(id) || changingJobs.has(id)) {
       res.status(409).json({ error: 'This evaluation is running, queued or being changed. Cancel a waiting test before editing its labels.' }); return;
     }
     changingJobs.add(id);
@@ -500,15 +548,16 @@ export async function createApp(options: {
   });
   app.delete('/api/jobs/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    if (active?.job.id === id || waiting.some(job => job.id === id) || changingJobs.has(id)) {
+    if (findActive(id) || findWaiting(id) || changingJobs.has(id)) {
       res.status(409).json({ error: 'This evaluation is running, queued or being changed. Cancel a waiting test before deleting it.' }); return;
     }
     await deleteEvaluation(id);
     res.json({ deleted: id });
   });
   async function run(job: Job, controller: AbortController, credentials: Credentials, selected = evaluationResults(job)) {
+    const queue = queueForJob(job);
     const rate = new QueueTiming(performance.now());
-    activeTiming = { rate, selected };
+    queue.activeTiming = { rate, selected };
     try {
       if (job.rubric !== RUBRIC_VERSION) throw new Error('The rubric changed. Create a new evaluation with the current rubric.');
       const byClip = new Map<string, Map<string, JudgeResult>>();
@@ -690,7 +739,7 @@ export async function createApp(options: {
         const remaining = job.status === 'queued' ? evaluationResults(job) : selected;
         const unfinished = remaining.filter(r => ['running', 'pending', 'cancelled'].includes(r.status));
         if (job.status !== 'queued') prepareRetry(job, unfinished);
-        const held = { ...job, status: 'queued' as const, queueOrder: firstQueueOrder() };
+        const held = { ...job, status: 'queued' as const, queueOrder: firstQueueOrder(queue) };
         let saved = true;
         try { await store.saveJob(held); }
         catch (saveError) {
@@ -698,15 +747,16 @@ export async function createApp(options: {
           console.error('Could not persist paused evaluation:', connection.redact(saveError));
         }
         if (job.autoRetry) {
-          waiting.push(held);
-          waiting.sort((a, b) => a.queueOrder! - b.queueOrder!);
+          queue.waiting.push(held);
+          queue.waiting.sort(queueOrderCompare);
           retryQueueSave(held, error, saved ? 'saved' : 'memory-only');
           return;
         }
         // A cancellation can arrive while the held checkpoint is being written.
         selected = unfinished;
       }
-      runtimeError = `Evaluation interrupted: ${connection.redact(error)}`;
+      const runtimeError = `Evaluation interrupted: ${connection.redact(error)}`;
+      queue.runtimeError = runtimeError;
       console.error(runtimeError);
       for (const r of selected) if (r.status === 'pending' || r.status === 'running') {
         r.status = 'interrupted'; r.error = runtimeError;
@@ -715,17 +765,18 @@ export async function createApp(options: {
       catch (saveError) { console.error('Could not persist interrupted state:', message(saveError)); }
       job.status = 'interrupted';
     } finally {
-      activeTiming = undefined;
-      active = undefined;
-      void drainQueue();
+      queue.activeTiming = undefined;
+      queue.active = undefined;
+      void drainQueue(queue);
     }
   }
   app.post('/api/jobs', async (req, res) => {
     const input = jobRequest.parse(req.body);
-    if (!input.enqueue && (active || dispatching || queuedWrites || waiting.length)) {
+    const queue = queues[input.arena ? 'arena' : 'scoring'];
+    if (!input.enqueue && hasWork(queue)) {
       res.status(409).json({ error: 'Another evaluation is running or queued. Add this test to the queue instead.' }); return;
     }
-    if (input.enqueue) queuedWrites++;
+    if (input.enqueue) queue.queuedWrites++;
     try {
       const credentials = connection.current();
       const settings = settingsSchema.parse(input.judges ? { judges: input.judges } : await store.settings());
@@ -751,13 +802,16 @@ export async function createApp(options: {
         throw new Error('Arena requires TTS single-speaker evaluation with the script locale as language/accent for all audio.');
       if (input.arena) {
         const references = arenaImport.referenceScripts(input.arena, clips);
+        const ssmls = arenaImport.ssmls(input.arena, clips);
         for (const clip of clips) {
           const text = references.get(clip.id);
           if (text) clip.referenceScript = text; else delete clip.referenceScript;
+          const ssml = ssmls.get(clip.id);
+          if (ssml) clip.ssml = ssml; else delete clip.ssml;
         }
       }
       // Recheck after asynchronous reads so two requests cannot start concurrent runs.
-      if (!input.enqueue && (active || dispatching || queuedWrites || waiting.length)) {
+      if (!input.enqueue && hasWork(queue)) {
         res.status(409).json({ error: 'Another evaluation is running or queued. Add this test to the queue instead.' }); return;
       }
       const job = newEvaluation({ name: input.name, profile: input.profile, judges: settings.judges, clips, autoRetry: input.autoRetry }, !!input.enqueue);
@@ -772,25 +826,27 @@ export async function createApp(options: {
         return;
       }
       const controller = new AbortController();
-      active = { job, controller };
+      queue.active = { job, controller };
       try { await store.saveJob(job); }
-      catch (error) { active = undefined; throw error; }
+      catch (error) { queue.active = undefined; throw error; }
       void run(job, controller, credentials);
       res.status(201).json(job);
     } finally {
-      if (input.enqueue) queuedWrites--;
-      void drainQueue();
+      if (input.enqueue) queue.queuedWrites--;
+      void drainQueue(queue);
     }
   });
   app.post('/api/jobs/:id/cancel', async (req, res) => {
     const id = uuid.parse(req.params.id);
     if (changingJobs.has(id)) { res.status(409).json({ error: 'This evaluation is being changed.' }); return; }
-    const index = waiting.findIndex(job => job.id === id);
-    if (index >= 0) {
+    const queue = findWaiting(id);
+    if (queue) {
+      const { waiting } = queue;
+      const index = waiting.findIndex(job => job.id === id);
       const [job] = waiting.splice(index, 1);
       const original = structuredClone(job);
       changingJobs.add(id);
-      queuedWrites++;
+      queue.queuedWrites++;
       job.status = 'cancelled';
       job.autoRetry = false; delete job.retryAfter;
       for (const result of evaluationResults(job)) {
@@ -798,17 +854,18 @@ export async function createApp(options: {
       }
       try {
         await store.saveJob(job);
-        if (saveRecovery?.jobId === id) { saveRecovery = undefined; clearSaveRetryTimer(); }
+        if (queue.saveRecovery?.jobId === id) { queue.saveRecovery = undefined; clearSaveRetryTimer(queue); }
         res.json({ status: 'cancelled' });
       }
       catch (error) {
-        waiting.push(original); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!); queuePaused = true;
-        queueError = `Queue paused: cancellation could not be saved. ${connection.redact(error)}`;
-        console.error(queueError); throw error;
-      } finally { changingJobs.delete(id); queuedWrites--; void drainQueue(); }
+        waiting.push(original); waiting.sort(queueOrderCompare); queue.paused = true;
+        queue.error = `Queue paused: cancellation could not be saved. ${connection.redact(error)}`;
+        console.error(queue.error); throw error;
+      } finally { changingJobs.delete(id); queue.queuedWrites--; void drainQueue(queue); }
       return;
     }
-    if (!active || active.job.id !== id) { res.status(409).json({ error: 'This evaluation is not running.' }); return; }
+    const active = findActive(id);
+    if (!active) { res.status(409).json({ error: 'This evaluation is not running.' }); return; }
     active.job.autoRetry = false;
     active.controller.abort(); res.json({ status: 'cancelling' });
   });
@@ -820,17 +877,18 @@ export async function createApp(options: {
       .refine(value => !value.file || value.retryUnassessed, 'A file can only be selected when retrying unassessed inputs.').parse(req.body);
     const { retryAudioIssues, singleSpeakerFallback, file } = input;
     const retryUnassessed = input.retryUnassessed ?? (enqueue && !retryAudioIssues);
-    if (!enqueue && (active || dispatching || queuedWrites || waiting.length)) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
     const credentials = connection.current();
     const id = uuid.parse(req.params.id);
-    if (changingJobs.has(id) || active?.job.id === id || waiting.some(job => job.id === id)) {
+    if (changingJobs.has(id) || findActive(id) || findWaiting(id)) {
       res.status(409).json({ error: 'This test already has a running or queued evaluation/retry. Retry again after it finishes.' }); return;
     }
     changingJobs.add(id);
-    if (enqueue) queuedWrites++;
+    let queue: Queue | undefined;
     try {
       const job = await store.read<Job>(path.join('jobs', `${id}.json`));
-      if (job.status === 'queued' || (!enqueue && (active || dispatching || queuedWrites || waiting.length))) { res.status(409).json({ error: 'An evaluation is running or queued. Use the queue controls or wait for it to finish.' }); return; }
+      queue = queueForJob(job);
+      if (enqueue) queue.queuedWrites++;
+      if (job.status === 'queued' || (!enqueue && hasWork(queue))) { res.status(409).json({ error: 'An evaluation is running or queued in this workspace. Use the queue controls or wait for it to finish.' }); return; }
       if (job.rubric !== RUBRIC_VERSION) { res.status(409).json({ error: 'The rubric changed. Start a new evaluation instead of mixing rubric versions.' }); return; }
       if (file && !job.clips.some(clip => clip.file === file)) {
         res.status(404).json({ error: 'The selected file does not belong to this evaluation.' }); return;
@@ -845,7 +903,7 @@ export async function createApp(options: {
         if (!await store.hasPcm(clip.id)) {
           res.status(409).json({ error: `Saved audio is unavailable for ${clip.file}. Import the original recording again.` }); return;
         }
-      if (!enqueue && (active || dispatching || queuedWrites || waiting.length)) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
+      if (!enqueue && hasWork(queue)) { res.status(409).json({ error: 'Another evaluation is running or queued in this workspace. Wait for the queue to finish.' }); return; }
       if (singleSpeakerFallback) job.profile = { ...job.profile, singleSpeakerFallback: true };
       job.autoRetry = input.autoRetry ?? true;
       delete job.retryAfter;
@@ -857,14 +915,16 @@ export async function createApp(options: {
         return;
       }
       job.status = 'running';
-      const controller = new AbortController(); active = { job, controller };
+      const controller = new AbortController(); queue.active = { job, controller };
       try { await store.saveJob(job); }
-      catch (error) { active = undefined; throw error; }
+      catch (error) { queue.active = undefined; throw error; }
       void run(job, controller, credentials, selected); res.json(job);
     } finally {
       changingJobs.delete(id);
-      if (enqueue) queuedWrites--;
-      void drainQueue();
+      if (queue) {
+        if (enqueue) queue.queuedWrites--;
+        void drainQueue(queue);
+      }
     }
   });
   const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
@@ -882,5 +942,9 @@ export async function createApp(options: {
     }
     res.status(400).json({ error: connection.redact(error) });
   };
-  return { app, errors, store, cancelActive: () => { queuePaused = true; clearSaveRetryTimer(); active?.controller.abort(); } };
+  return { app, errors, store, cancelActive: () => {
+    for (const queue of allQueues) {
+      queue.paused = true; clearSaveRetryTimer(queue); queue.active?.controller.abort();
+    }
+  } };
 }

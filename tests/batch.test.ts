@@ -195,7 +195,7 @@ test('shared clip preparation keeps complete windows, voice grouping, and roles 
   const profile = { ...newTestProfile(), scope: 'both' as const };
   const recording = {
     id: randomUUID(), file: new File(['audio'], 'voice.wav'), path: 'test/Voice/voice.wav',
-    voice: 'Voice', language: 'fr-FR', regions: [], include: true,
+    voice: 'Voice', language: 'fr-FR', regions: [], include: true, scriptText: 'Exact source script line.',
   };
   const uploads: Clip[] = [];
   const audio = {
@@ -208,6 +208,7 @@ test('shared clip preparation keeps complete windows, voice grouping, and roles 
   assert.deepEqual(uploads.map(clip => clip.role), ['agent', 'customer', 'agent', 'customer']);
   assert.equal(uploads[0].start, 0); assert.equal(uploads[2].end, MAX_SECONDS + 1);
   assert.ok(uploads.every(clip => clip.voice === 'Voice' && clip.language === 'fr-FR' && clip.file === recording.path));
+  assert.ok(uploads.every(clip => clip.referenceScript === recording.scriptText));
   const large = Array.from({ length: 198 }, () => randomUUID());
   const larger = await prepareEvaluationClips([recording], profile, async clip => { uploads.push(clip); }, () => {}, large, audio);
   assert.equal(larger.length, 202);

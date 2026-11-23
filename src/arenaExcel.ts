@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { ArenaCell } from '../shared/arena';
-import { activeDimensions, ARENA_RUBRIC, assessmentGaps, dimensionLabel, dimensions as ratingDimensions, summarize, summarizeVoiceEvidence, type Job } from '../shared/domain';
+import { activeDimensions, ARENA_RUBRIC, assessmentGaps, dimensionLabel, dimensions as ratingDimensions, summarize, summarizeVoiceEvidence, type Job, type StoredClip } from '../shared/domain';
 import { unassessedDescriptor, voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors';
 import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
 import { ttsIssueDetails, ttsIssueStatus, type TtsIssueSummary } from '../shared/ttsIssues';
@@ -10,6 +10,7 @@ import type { ArenaComparisonView } from './ArenaDimensionComparison';
 type Scorecard = { voices: readonly string[]; locales: readonly string[]; cells: ArenaCell[] };
 type Sheet = ExcelJS.Worksheet;
 type Value = string | number | null | undefined;
+type AudioScriptGroup = { identity: Value[]; clips: readonly StoredClip[] };
 const identity = ['Voice / model', 'Script locale', 'Domain', 'Source test ID'];
 const identityWidths = [42, 16, 23, 38];
 const scoreFormat = '0.00';
@@ -28,6 +29,28 @@ function addSheet(book: ExcelJS.Workbook, name: string, headers: string[], width
 function addRow(sheet: Sheet, values: Value[]) {
   sheet.addRow(values.map(value => typeof value === 'string'
     ? value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '') : value));
+}
+
+function addAudioScriptSheet(book: ExcelJS.Workbook, groups: readonly AudioScriptGroup[]) {
+  const sheet = addSheet(book, 'Audio Script', [
+    ...identity, 'Recording', 'Source script status', 'Source script text',
+  ], [...identityWidths, 58, 40, 100], 4);
+  for (const { identity: keys, clips } of groups) {
+    const files = new Map<string, StoredClip[]>();
+    for (const clip of clips) {
+      const key = JSON.stringify([clip.file, clip.voice]);
+      files.set(key, [...(files.get(key) ?? []), clip]);
+    }
+    for (const windows of files.values()) {
+      const versions = new Set(windows.map(clip => clip.referenceScript));
+      const available = versions.size === 1 && windows[0].referenceScript !== undefined;
+      const row = sheet.addRow([
+        ...keys, windows[0].file, available ? 'Available' : 'Unavailable — source script text not retained',
+        available ? windows[0].referenceScript : null,
+      ]);
+      row.getCell(7).alignment = { vertical: 'top', wrapText: true };
+    }
+  }
 }
 
 export function arenaWorkbook({ voices, locales, cells }: Scorecard, jobs: ReadonlyMap<string, Job>) {
@@ -58,6 +81,7 @@ export function arenaWorkbook({ voices, locales, cells }: Scorecard, jobs: Reado
   files.getColumn(6).numFmt = scoreFormat;
   recordings.getColumn(13).numFmt = scoreFormat;
   for (let i = 0; i < locales.length; i++) scorecard.getColumn(i + 2).numFmt = scoreFormat;
+  const audioGroups: AudioScriptGroup[] = [];
   for (const voice of voices) {
     const row = locales.map(locale => byCell.get(JSON.stringify([voice, locale])));
     addRow(scorecard, [voice, ...row.map(cell => cell?.score)]);
@@ -75,6 +99,7 @@ export function arenaWorkbook({ voices, locales, cells }: Scorecard, jobs: Reado
       const evidence = summarizeVoiceEvidence(selected)[0];
       const descriptors = voiceDescriptorRows(selected)[0]?.labels;
       const keys = [voice, cell.locale, cell.domain, cell.jobId];
+      audioGroups.push({ identity: keys, clips });
       addRow(details, [...keys, cell.model, cell.gender, cell.score, summary.eligibleFiles, summary.files, job.name,
         cell.createdAt, cell.panel, cell.rubric, job.arena.scripts.join(', '), ...voiceDescriptorKeys.map(key => descriptors?.[key])]);
 
@@ -117,19 +142,24 @@ export function arenaWorkbook({ voices, locales, cells }: Scorecard, jobs: Reado
       }
     }
   }
+  addAudioScriptSheet(book, audioGroups);
   return book;
+}
+
+async function loadJobs(ids: readonly string[], load: (id: string) => Promise<Job>) {
+  const jobs = new Map<string, Job>();
+  for (let i = 0; i < ids.length; i += 3)
+    await Promise.all(ids.slice(i, i + 3).map(async id => jobs.set(id, await load(id))));
+  return jobs;
 }
 
 export async function exportArenaWorkbook(scorecard: Scorecard, load: (id: string) => Promise<Job>, domain: string) {
   const ids = [...new Set(scorecard.cells.map(cell => cell.jobId))];
-  const jobs = new Map<string, Job>();
-  for (let i = 0; i < ids.length; i += 3) {
-    await Promise.all(ids.slice(i, i + 3).map(async id => jobs.set(id, await load(id))));
-  }
+  const jobs = await loadJobs(ids, load);
   await downloadWorkbook(arenaWorkbook(scorecard, jobs), `voice-arena-${domain}.xlsx`);
 }
 
-export function arenaComparisonWorkbook(rows: readonly ArenaCell[], view: ArenaComparisonView) {
+export function arenaComparisonWorkbook(rows: readonly ArenaCell[], view: ArenaComparisonView, jobs: ReadonlyMap<string, Job>) {
   const book = new ExcelJS.Workbook();
   const descriptors = view === 'descriptors';
   const headers = descriptors ? voiceDescriptorKeys.map(key => voiceDescriptorFields[key].label) :
@@ -140,20 +170,31 @@ export function arenaComparisonWorkbook(rows: readonly ArenaCell[], view: ArenaC
   if (!descriptors) {
     for (let column = 5; column < 5 + headers.length; column++) sheet.getColumn(column).numFmt = scoreFormat;
   }
+  const audioGroups: AudioScriptGroup[] = [];
   for (const cell of rows) {
     const values = descriptors
       ? voiceDescriptorKeys.map(key => cell.voiceDescriptors ? cell.voiceDescriptors[key] ?? unassessedDescriptor : 'Not collected')
       : [cell.score, ...ratingDimensions.map(dimension => cell.dimensionScores?.find(item => item.dimension === dimension)?.score)];
     addRow(sheet, [arenaVoiceName(cell.voice), cell.model, cell.locale, cell.gender, ...values, cell.domain, cell.jobId]);
+    const job = jobs.get(cell.jobId);
+    if (!job || job.status !== 'completed' || job.arena?.locale !== cell.locale || job.arena.domain !== cell.domain)
+      throw new Error(`The saved test for ${cell.voice} (${cell.locale}) changed. Refresh the comparison and try again.`);
+    audioGroups.push({
+      identity: [cell.voice, cell.locale, cell.domain, cell.jobId],
+      clips: job.clips.filter(clip => clip.voice === cell.voice && clip.role === 'speaker'),
+    });
   }
+  addAudioScriptSheet(book, audioGroups);
   return book;
 }
 
-export async function exportArenaComparison(rows: readonly ArenaCell[], view: ArenaComparisonView) {
-  await downloadWorkbook(arenaComparisonWorkbook(rows, view), `voice-arena-comparison-${view}.xlsx`);
+export async function exportArenaComparison(rows: readonly ArenaCell[], view: ArenaComparisonView, load: (id: string) => Promise<Job>) {
+  const ids = [...new Set(rows.map(cell => cell.jobId))];
+  const jobs = await loadJobs(ids, load);
+  await downloadWorkbook(arenaComparisonWorkbook(rows, view, jobs), `voice-arena-comparison-${view}.xlsx`);
 }
 
-export function ttsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string) {
+export function ttsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string, job: Job) {
   const book = new ExcelJS.Workbook();
   const sheet = addSheet(book, 'TTS review details', [
     ...identity, 'Role', 'Review type', 'Dimension', 'Panel score (1–5)', 'Recording', 'Window start (s)',
@@ -172,11 +213,20 @@ export function ttsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId:
     }
     if (!hasDetails) addRow(sheet, [...keys, 'status', null, null, null, null, null, null, null, ttsIssueStatus(voice)]);
   }
+  const audioGroups = new Map<string, { identity: Value[]; clips: StoredClip[] }>();
+  for (const clip of job.clips) {
+    const identity = [clip.voice, job.arena?.locale ?? clip.language, job.arena?.domain ?? '', reportId];
+    const key = JSON.stringify(identity);
+    const group = audioGroups.get(key) ?? { identity, clips: [] };
+    group.clips.push(clip);
+    audioGroups.set(key, group);
+  }
+  addAudioScriptSheet(book, [...audioGroups.values()]);
   return book;
 }
 
-export async function exportTtsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string) {
-  await downloadWorkbook(ttsDetailsWorkbook(voices, reportId), `tts-review-details-${reportId}.xlsx`);
+export async function exportTtsDetailsWorkbook(voices: readonly TtsIssueSummary[], reportId: string, job: Job) {
+  await downloadWorkbook(ttsDetailsWorkbook(voices, reportId, job), `tts-review-details-${reportId}.xlsx`);
 }
 
 async function downloadWorkbook(book: ExcelJS.Workbook, filename: string) {

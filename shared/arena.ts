@@ -66,43 +66,55 @@ export type ArenaReport = {
   filterVoices?: ArenaFilterVoice[];
 };
 export type ArenaData = { cells: ArenaCell[]; reports: ArenaReport[] };
+type ArenaReportSummary = { report: ArenaReport; cells: ArenaCell[] };
 
 export function arenaData(jobs: Job[]): ArenaData {
+  return mergeArenaReports(jobs.map(summarizeArenaReport));
+}
+
+export function mergeArenaReports(parts: (ArenaReportSummary | undefined)[]): ArenaData {
   const cells = new Map<string, ArenaCell>();
   const reports: ArenaReport[] = [];
-  for (const job of [...jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))) {
-    if (!job.arena) continue;
-    const summaries = summarize(job);
-    const eligible = summaries.filter(row => job.status === 'completed' && row.score !== null && row.eligibleFiles === row.files);
-    const descriptors = new Map(voiceDescriptorRows(job).map(row => [row.voice, row.labels]));
-    const genders = testNameMetadata(job.name ?? '').genders;
-    const voiceDetails = (voice: string): ArenaFilterVoice => ({
-      voice, model: studioVoiceModel({ ShortName: voice }),
-      gender: job.voiceLabels?.find(label => label.voice === voice)?.gender ??
-        (genders.length === 1 ? genders[0] : 'Unspecified'),
-    });
-    reports.push({
-      id: job.id, name: job.name ?? 'Arena test', createdAt: job.createdAt, status: job.status, arena: job.arena,
-      voices: summaries.length, eligibleVoices: eligible.length,
-      filterVoices: [...new Set(job.clips.map(clip => clip.voice))].map(voiceDetails),
-    });
-    for (const row of eligible) {
-      const { domain, locale } = job.arena;
-      const voice = row.voice;
-      const key = JSON.stringify([domain, locale, voice]);
-      if (cells.has(key)) continue;
-      const panel = job.judges.map(judge => judge.deployment).sort().join(', ');
-      const rubric = job.profile.rubric?.name ?? job.rubric;
-      cells.set(key, {
-        ...voiceDetails(voice),
-        domain, locale, score: row.score!, jobId: job.id, createdAt: job.createdAt, files: row.files, panel, rubric,
-        dimensionScores: activeDimensions(job.profile).map(dimension => ({
-          dimension, label: dimensionLabel(job.profile, dimension), score: row.dimensions[dimension],
-        })),
-        voiceDescriptors: descriptors.get(voice),
-        comparison: JSON.stringify([panel, job.profile.rubric ?? job.rubric, job.profile.target]),
-      });
+  const sorted = parts.filter(part => part !== undefined)
+    .sort((a, b) => b.report.createdAt.localeCompare(a.report.createdAt) || b.report.id.localeCompare(a.report.id));
+  for (const { cells: candidates, report } of sorted) {
+    reports.push(report);
+    for (const cell of candidates) {
+      const key = JSON.stringify([cell.domain, cell.locale, cell.voice]);
+      if (!cells.has(key)) cells.set(key, cell);
     }
   }
   return { cells: [...cells.values()], reports };
+}
+
+export function summarizeArenaReport(job: Job): ArenaReportSummary | undefined {
+  if (!job.arena) return undefined;
+  const arena = job.arena;
+  const summaries = summarize(job);
+  const eligible = job.status === 'completed' ? summaries.filter(row => row.score !== null && row.eligibleFiles === row.files) : [];
+  const descriptors = new Map(eligible.length ? voiceDescriptorRows(job).map(row => [row.voice, row.labels]) : []);
+  const genders = testNameMetadata(job.name ?? '').genders;
+  const voiceDetails = (voice: string): ArenaFilterVoice => ({
+    voice, model: studioVoiceModel({ ShortName: voice }),
+    gender: job.voiceLabels?.find(label => label.voice === voice)?.gender ??
+      (genders.length === 1 ? genders[0] : 'Unspecified'),
+  });
+  const report: ArenaReport = {
+    id: job.id, name: job.name ?? 'Arena test', createdAt: job.createdAt, status: job.status, arena,
+    voices: summaries.length, eligibleVoices: eligible.length,
+    filterVoices: [...new Set(job.clips.map(clip => clip.voice))].map(voiceDetails),
+  };
+  const panel = job.judges.map(judge => judge.deployment).sort().join(', ');
+  const rubric = job.profile.rubric?.name ?? job.rubric;
+  const comparison = JSON.stringify([panel, job.profile.rubric ?? job.rubric, job.profile.target]);
+  const cells: ArenaCell[] = eligible.map(row => ({
+    ...voiceDetails(row.voice),
+    domain: arena.domain, locale: arena.locale, score: row.score!, jobId: job.id, createdAt: job.createdAt,
+    files: row.files, panel, rubric, comparison,
+    dimensionScores: activeDimensions(job.profile).map(dimension => ({
+      dimension, label: dimensionLabel(job.profile, dimension), score: row.dimensions[dimension],
+    })),
+    voiceDescriptors: descriptors.get(row.voice),
+  }));
+  return { report, cells };
 }

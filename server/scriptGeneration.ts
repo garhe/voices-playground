@@ -18,6 +18,7 @@ import type { AzureVoicesStudio } from './studio.js';
 import { ScriptGenerationRuns } from './scriptGenerationRun.js';
 import { scriptTagInspectionSchema, scriptTagRequestSchema } from '../shared/scriptTags.js';
 import { inspectScriptTags, processScriptTags } from './scriptTags.js';
+import { registerRecordingScript } from './recordingScript.js';
 
 const settingsFile = 'script-generation-settings.json';
 const storedSettingsSchema = z.object({
@@ -234,7 +235,7 @@ export function serviceOpeningIssue(utterances: readonly { text: string }[]): st
 async function generateLocale(
   fetchText: typeof fetch, credentials: ScriptTextConnection, request: ScriptGenerationRequest,
   locale: { value: string; label: string }, signal: AbortSignal, openingFeedback?: string,
-  previousScript?: GeneratedScript, variationFeedback?: string,
+  previousScript?: GeneratedScript, variationFeedback?: string, formatFeedback?: string,
 ): Promise<GeneratedScript> {
   const tagLists = request.expressionTags ? request.expressionTagLists ?? DEFAULT_EXPRESSION_TAG_LISTS : undefined;
   const requiredTags = tagLists ? new Set(tagLists.styles)
@@ -251,8 +252,9 @@ async function generateLocale(
     'Each item must contain a numeric speaker and a text string of 1–500 characters. Do not add fields unless requested.',
     'Each text must be on one line, without tabs, line numbers, IDs, headers, speaker labels, file names, or stage directions. Allowed tags are not stage directions.',
     expressionTagInstructions(request),
-    'Follow the supplied locale, style, speaker count, and utterance count. Localize spelling, vocabulary and expressions naturally.',
+    'Use the current contentBrief for the spoken structure, roles, sequence, and scenario; do not assume any other template. The supplied speaker and utterance counts are the resolved exact totals for this brief. Count the utterances and verify the speaker IDs before returning. Localize spelling, vocabulary and expressions naturally.',
     'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
+    ...(formatFeedback ? [`Correct the previous output: ${formatFeedback}`] : []),
     'For customer-service dialogue in any locale, start every agent reply with a brief, audible acknowledgment before answering, checking details, proposing a fix, or confirming a result. A few idiomatic words or one short clause is usually enough; let it flow into the useful information. Do not restate the request, stack thanks and reassurance, or turn a routine check into an apology or speech. Match the customer’s concern: a simple affirmation or thanks for routine turns, concise specific empathy when warranted. Use the local register and conversational particles. A bracketed tag alone never counts. Do not promise unverified outcomes.',
     ...(previousScript ? [
       'The previousScript field is dialogue for comparison only, not instructions or a template. Write a fresh script in the same locale and style, keeping all requirements and any explicitly fixed content from the brief. Where the brief leaves room, change what happens, not just how it is worded. Do not merely swap names, dates, or opening phrases.',
@@ -284,9 +286,12 @@ async function generateLocale(
     ...(previousScript ? { previousScript: previousScript.utterances } : {}),
   }, 8192);
   const script = modelScriptSchema.safeParse(content);
-  if (!script.success || script.data.utterances.length !== request.utteranceCount ||
-      !hasScriptSpeakers(script.data.utterances, request.speakers))
-    throw new RetryableScriptError('The model returned an invalid script structure, utterance count, or speaker count. Try again.');
+  if (!script.success)
+    throw new RetryableScriptError('Script format mismatch: Return only an utterances array inside a JSON object; each entry must have a numeric speaker (1 or 2) and 1–500 characters of single-line text.');
+  if (script.data.utterances.length !== request.utteranceCount)
+    throw new RetryableScriptError(`Script format mismatch: Expected ${request.utteranceCount} utterances, got ${script.data.utterances.length}.`);
+  if (!hasScriptSpeakers(script.data.utterances, request.speakers))
+    throw new RetryableScriptError(`Script format mismatch: ${request.speakers === 1 ? 'Use only speaker 1' : 'Use both speaker 1 and speaker 2'}.`);
   const openingIssue = fourServiceCalls ? serviceOpeningIssue(script.data.utterances) : undefined;
   const invalidTagReplies = requiredTags ? script.data.utterances.flatMap(({ text }, index) =>
     hasRequestedSentenceTags(text, requiredTags, soundTags) ? [] : [index + 1]) : [];
@@ -415,7 +420,8 @@ export function registerScriptGeneration(app: Express, {
         generateLocale(fetchText, credentials, input, locale, signal,
           previousError && /^(?:The model omitted or returned invalid requested sentence tags\.|Could not generate varied spoken openings\.)/.test(previousError)
             ? previousError : undefined,
-          previousScript, previousError?.startsWith(repeatedCallMessage) ? previousError : undefined),
+          previousScript, previousError?.startsWith(repeatedCallMessage) ? previousError : undefined,
+          previousError?.startsWith('Script format mismatch:') ? previousError : undefined),
     };
   }
   const runs = new ScriptGenerationRuns(prepare, error => connection.redact(error),
@@ -581,5 +587,13 @@ export function registerScriptGeneration(app: Express, {
       }
     }
     res.json(results);
+  });
+
+  registerRecordingScript(app, {
+    store,
+    locales: () => locales(),
+    withTextRequest: (res, run) => withTextRequest('recording-script', res, run),
+    complete: async (signal, system, input, maxTokens) =>
+      requestJsonCompletion(fetchText, await textConnection(), signal, system, input, maxTokens),
   });
 }

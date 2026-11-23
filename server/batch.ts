@@ -4,6 +4,7 @@ import path from 'node:path';
 import { batchDirectorySchema, supportedAudio, type BatchPreview, type BatchTest } from '../shared/batch.js';
 import { testNameSchema } from '../shared/domain.js';
 import { testNameMetadata } from '../shared/history.js';
+import { exactStudioAudioSourcesForAudios } from './studio.js';
 
 type Source = { path: string; size: number; mtimeMs: number };
 export class BatchImport {
@@ -67,6 +68,14 @@ export class BatchImport {
       response.tests.push(test);
     }
     if (!response.tests.length) throw new Error('No test folders found. Use parent directory → test folders → voice folders → audio files.');
+    const batchFiles = response.tests.flatMap(test => test.files);
+    const sources = await exactStudioAudioSourcesForAudios(batchFiles.map(file => files.get(file.id)!.path));
+    for (const [index, file] of batchFiles.entries()) {
+      const source = sources[index];
+      if (!source) continue;
+      file.ssml = source.ssml;
+      file.scriptText = source.scriptText;
+    }
     this.preview = { token: response.token, files };
     return response;
   }

@@ -107,6 +107,9 @@
   'use strict';
   const byId = id => document.getElementById(id);
   const data = JSON.parse(byId('scorecard-data').textContent);
+  // Share links may limit the scorecard to specific domains (?domain=a&domain=b).
+  const sharedDomains = new Set(new URLSearchParams(location.search).getAll('domain'));
+  if (sharedDomains.size) data.cells = data.cells.filter(cell => sharedDomains.has(cell.domain));
   const labels = new Map(data.dimensions.map(({ id, label }) => [id, label]));
   const issueDescriptions = new Map([
     ['naturalness', [

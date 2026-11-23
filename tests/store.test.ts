@@ -8,6 +8,42 @@ import { once } from 'node:events';
 import { Store } from '../server/store.js';
 import { clip, job } from './fixtures.js';
 
+test('report projections share concurrent scans and reread only added or changed jobs', async context => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-projections-'));
+  const store = new Store(root);
+  try {
+    await store.init();
+    const first = job([clip()], [4]);
+    const second = job([clip()], [3]);
+    await store.saveJob(first);
+    await store.saveJob(second);
+    const reads = context.mock.method(store, 'read');
+    let projections = 0;
+    const load = store.jobProjections(value => {
+      projections++;
+      return { id: value.id, name: value.name, status: value.status };
+    });
+    const initial = load();
+    assert.equal(load(), initial);
+    assert.equal((await initial).length, 2);
+    assert.deepEqual(await load(), await initial);
+    assert.equal(reads.mock.callCount(), 2);
+    assert.equal(projections, 2);
+
+    await store.saveJob({ ...first, name: 'Updated report', status: 'queued' });
+    const updated = await load();
+    assert.deepEqual(updated.find(item => item.id === first.id), { id: first.id, name: 'Updated report', status: 'queued' });
+    assert.equal(reads.mock.callCount(), 3);
+
+    await store.remove(path.join('jobs', `${second.id}.json`));
+    const third = job([clip()], [5]);
+    await store.saveJob(third);
+    assert.deepEqual((await load()).map(item => item.id).sort(), [first.id, third.id].sort());
+    assert.equal(reads.mock.callCount(), 4);
+    assert.equal(projections, 4);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('temporary Windows rename locks retry the same atomic save without losing queued updates', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-lock-'));
   const failures = ['EPERM', 'EACCES', 'EBUSY'];

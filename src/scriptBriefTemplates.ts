@@ -46,3 +46,33 @@ export function saveBriefTemplate(
   catch { throw new Error('Could not save the template to this browser. Your brief is still in the editor.'); }
   return { template, templates };
 }
+
+export function updateBriefTemplate(
+  storage: Pick<Storage, 'getItem' | 'setItem'>, name: string, prompt: string,
+): BriefTemplate[] {
+  const parsed = promptSchema.safeParse(prompt);
+  if (!parsed.success) throw new Error(parsed.error.issues[0].message);
+  let existing: BriefTemplate[];
+  try { existing = loadBriefTemplates(storage); }
+  catch { throw new Error('Saved templates could not be read. No templates were changed.'); }
+  if (!existing.some(template => template.name === name)) {
+    throw new Error('This saved template no longer exists. Your brief is still in the editor.');
+  }
+  const templates = existing.map(template => template.name === name ? { ...template, prompt: parsed.data } : template);
+  try { storage.setItem(STORAGE_KEY, JSON.stringify(templates)); }
+  catch { throw new Error('Could not update the template in this browser. Your brief is still in the editor.'); }
+  return templates;
+}
+
+export function deleteBriefTemplate(storage: Pick<Storage, 'getItem' | 'setItem'>, name: string): BriefTemplate[] {
+  let existing: BriefTemplate[];
+  try { existing = loadBriefTemplates(storage); }
+  catch { throw new Error('Saved templates could not be read. No templates were changed.'); }
+  if (!existing.some(template => template.name === name)) {
+    throw new Error('This saved template no longer exists. No templates were deleted.');
+  }
+  const templates = existing.filter(template => template.name !== name);
+  try { storage.setItem(STORAGE_KEY, JSON.stringify(templates)); }
+  catch { throw new Error('Could not delete the template from this browser.'); }
+  return templates;
+}

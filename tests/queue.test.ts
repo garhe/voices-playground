@@ -13,8 +13,7 @@ import type { BulkTestResult } from '../shared/history.js';
 import { RUBRIC_VERSION, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, unassessedInputs, type Job, type TestQueueState } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TestQueue, queueForWorkspace } from '../src/TestQueue.js';
-import { testHistory } from '../shared/history.js';
+import { TestQueue } from '../src/TestQueue.js';
 
 async function until<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
   for (let n = 0; n < 200; n++) {
@@ -622,44 +621,101 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   assert.doesNotMatch(css, /\.arena-status-queue|\.arena-queued-tests|\.arena-queue-item/);
 });
 
-test('workspace queue hides other jobs and unclassified names while retaining global controls', () => {
-  const arena = fixtureJob(); arena.name = 'Arena active job'; arena.arena = { domain: 'service', locale: 'en-US', scripts: ['en-US_service'] };
-  const scoring = fixtureJob(); scoring.name = 'Scoring queued job';
-  const waitingArena = fixtureJob(); waitingArena.name = 'Arena queued job'; waitingArena.arena = arena.arena;
-  const history = [arena, scoring, waitingArena].map(testHistory);
-  const state: TestQueueState = {
-    paused: true,
-    active: { id: arena.id, name: arena.name },
-    waiting: [
-      { id: scoring.id, name: scoring.name },
-      { id: waitingArena.id, name: waitingArena.name },
-      { id: 'unknown', name: 'Unclassified job' },
-    ],
-  };
-  const scoringQueue = queueForWorkspace(state, history, 'scoring');
-  assert.equal(scoringQueue.hiddenActive, true);
-  assert.equal(scoringQueue.hiddenWaiting, 2);
-  assert.deepEqual(scoringQueue.state.waiting.map(entry => entry.id), [scoring.id]);
+test('workspace queue panels show their own controls and waiting tests', () => {
   const noop = () => {};
-  const render = (workspace: 'arena' | 'scoring', queue = state) => renderToStaticMarkup(createElement(TestQueue, {
-    state: queue, workspace, history, busy: false, onPause: noop, onStart: noop, onCancel: noop,
+  const render = (workspace: 'arena' | 'scoring', state: TestQueueState) => renderToStaticMarkup(createElement(TestQueue, {
+    state, workspace, busy: false, onPause: noop, onStart: noop, onCancel: noop,
   }));
-  const scoringHtml = render('scoring');
-  assert.match(scoringHtml, /Scoring queued job/);
-  assert.match(scoringHtml, /Another or unclassified test is running/);
-  assert.match(scoringHtml, /Queue controls apply to both/);
-  assert.doesNotMatch(scoringHtml, /Arena active job|Arena queued job|Unclassified job/);
-  assert.doesNotMatch(scoringHtml, /Cancel running test/);
-  const arenaHtml = render('arena');
-  assert.match(arenaHtml, /Arena active job/);
-  assert.match(arenaHtml, /Arena queued job/);
-  assert.match(arenaHtml, /Cancel running test/);
-  assert.doesNotMatch(arenaHtml, /Scoring queued job|Unclassified job/);
-  const onlyOtherWaiting = render('scoring', { paused: true, waiting: [{ id: waitingArena.id, name: waitingArena.name }] });
-  assert.match(onlyOtherWaiting, /<button class="secondary">Start queue<\/button>/);
-  assert.doesNotMatch(onlyOtherWaiting, /Arena queued job/);
-  const marked = queueForWorkspace({ paused: false, waiting: [{ id: 'new', name: 'New Arena', workspace: 'arena' }] }, [], 'scoring');
-  assert.equal(marked.hiddenWaiting, 1);
+  const scoring = render('scoring', { paused: true, waiting: [{ id: 'next', name: 'Scoring next' }] });
+  assert.match(scoring, /Scoring test queue.*Scoring next/);
+  assert.match(scoring, /<button class="secondary">Start queue<\/button>/);
+  assert.match(scoring, /Queue controls apply only to this workspace/);
+  assert.doesNotMatch(scoring, /Cancel running test|Pause queue/);
+  const arena = render('arena', { paused: false, active: { id: 'active', name: 'Arena current' }, waiting: [] });
+  assert.match(arena, /Arena test queue.*Running: Arena current/);
+  assert.match(arena, /Cancel running test.*Pause queue/);
+  assert.doesNotMatch(arena, /Start queue|Scoring next/);
+});
+
+test('saved workspace queues run concurrently and pause, cancel and retry independently', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workspace-queues-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const options = { dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only' };
+  const seed = await createApp(options);
+  const jobs = ['Arena first', 'Scoring first', 'Arena next', 'Scoring next'].map((name, i): Job => {
+    const job = fixtureJob();
+    return {
+      ...job, id: randomUUID(), name, status: 'queued', queueOrder: i + 1, autoRetry: false, rubric: RUBRIC_VERSION,
+      profile: { ...job.profile, target: name },
+      arena: i % 2 === 0 ? { domain: 'service', locale: 'en-US', scripts: ['en-US_service'] } : undefined,
+      results: job.results.map(({ clipId, judgeId }) => ({ clipId, judgeId, status: 'pending' })),
+    };
+  });
+  for (const job of jobs) {
+    await seed.store.saveClip(job.clips[0], Buffer.alloc(48000));
+    await seed.store.saveJob(job);
+  }
+  const holds = new Map(jobs.map(job => [job.name, gate()]));
+  const entered = new Set<string>();
+  const backend = await createApp({
+    ...options,
+    evaluate: async ({ profile, signal }) => {
+      entered.add(profile.target);
+      let abort!: () => void;
+      const cancelled = new Promise<void>(resolve => { abort = () => resolve(); });
+      signal.addEventListener('abort', abort, { once: true });
+      try { await Promise.race([holds.get(profile.target)!.promise, cancelled]); }
+      finally { signal.removeEventListener('abort', abort); }
+      if (signal.aborted) throw new Error('Cancelled');
+      return { assessment: assessment() };
+    },
+  });
+  backend.app.use(backend.errors); server.on('request', backend.app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body = {}) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const read = async (workspace: 'arena' | 'scoring') => (await fetch(`${url}/api/queue?workspace=${workspace}`)).json() as Promise<TestQueueState>;
+  const command = async (workspace: 'arena' | 'scoring', action: 'start' | 'pause') =>
+    assert.equal((await post(`/api/queue/${action}?workspace=${workspace}`, { consent: true })).status, 200);
+  const [arenaFirst, scoringFirst, arenaNext, scoringNext] = jobs;
+  try {
+    assert.equal((await read('arena')).paused, true);
+    assert.equal((await read('scoring')).paused, true);
+    assert.deepEqual((await read('arena')).waiting.map(job => job.id), [arenaFirst.id, arenaNext.id]);
+    assert.deepEqual((await read('scoring')).waiting.map(job => job.id), [scoringFirst.id, scoringNext.id]);
+    await command('arena', 'start');
+    assert.equal((await read('scoring')).paused, true);
+    assert.equal((await read('scoring')).active, undefined);
+    await command('scoring', 'start');
+    await until(async () => entered.size, count => count === 2);
+    assert.equal((await read('arena')).active?.id, arenaFirst.id);
+    assert.equal((await read('scoring')).active?.id, scoringFirst.id);
+    await command('arena', 'pause');
+    assert.equal((await read('arena')).active?.id, arenaFirst.id);
+    assert.equal((await read('scoring')).paused, false);
+    assert.equal((await post(`/api/jobs/${arenaFirst.id}/cancel`)).status, 200);
+    await until(() => read('arena'), state => !state.active);
+    assert.equal((await read('scoring')).active?.id, scoringFirst.id);
+    assert.equal((await post(`/api/jobs/${arenaFirst.id}/retry`, { consent: true, autoRetry: false })).status, 202);
+    assert.deepEqual((await read('arena')).waiting.map(job => job.id), [arenaNext.id, arenaFirst.id]);
+    assert.deepEqual((await read('scoring')).waiting.map(job => job.id), [scoringNext.id]);
+    holds.get(scoringFirst.name)!.release();
+    await until(() => read('scoring'), state => state.active?.id === scoringNext.id);
+    assert.equal(entered.has(arenaNext.profile.target), false);
+    await command('arena', 'start');
+    await until(() => read('arena'), state => state.active?.id === arenaNext.id);
+    holds.get(arenaNext.name)!.release();
+    holds.get(arenaFirst.name)!.release();
+    holds.get(scoringNext.name)!.release();
+    await Promise.all((['arena', 'scoring'] as const).map(workspace =>
+      until(() => read(workspace), state => !state.active && !state.waiting.length)));
+  } finally {
+    for (const hold of holds.values()) hold.release();
+    backend.cancelActive(); server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('concurrent queue admissions persist before execution and a dispatch save failure retries without losing tests', async t => {

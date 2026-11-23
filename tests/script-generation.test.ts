@@ -13,13 +13,31 @@ import { parseStudioScript } from '../server/studioScripts.js';
 import { expressionTagListsSchema, type ExpressionTagLists } from '../shared/scriptExpressionTags.js';
 import { MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, SCRIPT_PROGRESS_CONTENT_TYPE, scriptFileName, scriptFileText, scriptGenerationSchema, type GeneratedScript, type ScriptGenerationResult, type ScriptGenerationStatus } from '../shared/scriptGeneration.js';
 import { generateScriptPreview, generateScriptsWithRetry, mergeBatchResults, regenerateLocalePreview } from '../src/scriptGenerationProgress.js';
-import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief } from '../src/scriptBriefTemplates.js';
+import { deleteBriefTemplate, loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief, updateBriefTemplate } from '../src/scriptBriefTemplates.js';
 import { BUILT_IN_BRIEF_TEMPLATES, DEFAULT_SCRIPT_BRIEF, DEFAULT_SCRIPT_LOCALES, extractScriptStyle, ScriptGeneration } from '../src/ScriptGeneration.js';
 
 const brief = {
   locales: ['fr-ca'], style: '  Friendly support call with dry humor  ', speakers: 2, utteranceCount: 2,
   prompt: 'Reschedule a delivery.', consent: true,
 };
+
+test('explicit counts in the current brief override form values independently', () => {
+  const parse = (prompt: string) => scriptGenerationSchema.parse({ ...brief, speakers: 1, utteranceCount: 16, prompt });
+  assert.deepEqual(
+    (({ speakers, utteranceCount }) => [speakers, utteranceCount])(parse('Speakers: 2\nUtterances: 24\nWrite a delivery dialogue.')),
+    [2, 24],
+  );
+  assert.equal(parse('Write a two-speaker dialogue.').speakers, 2);
+  assert.equal(parse('Write 4 utterances per call.').utteranceCount, 16);
+  assert.equal(parse('Four calls and up to 20 utterances total.').utteranceCount, 16);
+  assert.equal(parse('Return exactly 12 utterances.').utteranceCount, 12);
+  assert.equal(parse('Speakers: 2').utteranceCount, 16);
+  assert.equal(parse(DEFAULT_SCRIPT_BRIEF).utteranceCount, 16);
+  assert.throws(() => parse('Speakers: 1\nSpeakers: 2'), /conflicting counts/);
+  assert.throws(() => parse('Speakers: 3'), /1 or 2 speakers/);
+  assert.throws(() => parse('Utterances: 51'), /between 1 and 50 utterances/);
+  assert.throws(() => parse('Speakers: 2\nUtterances: 1'), /one utterance per speaker/);
+});
 
 test('default content brief keeps tag rules separate and requires hesitations in each call', () => {
   const html = renderToStaticMarkup(createElement(ScriptGeneration, {
@@ -52,10 +70,12 @@ test('default content brief keeps tag rules separate and requires hesitations in
   assert.match(prompt, /End any utterance at the question\./);
   assert.match(prompt, /without asterisks; parentheses only for airport codes\./);
   assert.match(html, /Script style<input[^>]*value="Customer_Services"/);
+  assert.match(html, /Speakers<select disabled="">.*?From content brief/);
+  assert.match(html, /Utterances per locale<input[^>]*readOnly=""[^>]*value="16"[^>]*>.*?From content brief/);
   assert.doesNotMatch(html, /Leave blank to use the style from the brief/);
   assert.match(html, /<section class="card script-generation-card"><h2>01 · Script brief<\/h2>[\s\S]*?<\/section><section class="card script-generation-card"[^>]*><h2[^>]*>02 · Languages \/ Accents<\/h2>[\s\S]*?Generate preview[\s\S]*?<\/section><\/form><form[^>]*><h2>03 · Preview and save<\/h2>/);
   assert.match(html, /<option value="customer_services" selected="">customer_services<\/option>/);
-  assert.match(html, /<button[^>]*type="button"[^>]*>Save as default<\/button>/);
+  assert.doesNotMatch(html, />Save as default<\/button>|>Update template<\/button>|>Delete template<\/button>/);
   assert.doesNotMatch(html, /<option value="customer_services_tag"/);
   assert.doesNotMatch(prompt, /Do NOT use any square brackets/);
   assert.doesNotMatch(prompt, /4 to 6 total/);
@@ -133,6 +153,36 @@ test('named brief copies persist exactly and cannot overwrite built-ins or saved
   assert.throws(() => saveBriefTemplate({ ...storage, setItem: () => { throw new Error('Storage full'); } },
     { ...draft, name: 'Another template' }, BUILT_IN_BRIEF_TEMPLATES), /Could not save/);
   assert.throws(() => saveBriefTemplate({ ...storage, getItem: () => '{' }, draft, BUILT_IN_BRIEF_TEMPLATES), /No templates were overwritten/);
+});
+
+test('saved templates can be updated and deleted without changing other templates', () => {
+  const entries = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => { entries.set(key, value); },
+  };
+  const first = { name: 'First', prompt: 'Original brief.' };
+  const second = { name: 'Second', prompt: 'Other brief.' };
+  saveBriefTemplate(storage, first, BUILT_IN_BRIEF_TEMPLATES);
+  saveBriefTemplate(storage, second, BUILT_IN_BRIEF_TEMPLATES);
+  const updated = { ...first, prompt: 'Latest edit.\n' };
+  assert.deepEqual(updateBriefTemplate(storage, first.name, updated.prompt), [updated, second]);
+  assert.deepEqual(loadBriefTemplates(storage), [updated, second]);
+  assert.throws(() => updateBriefTemplate(storage, first.name, '  '), /Enter a content brief/);
+  assert.throws(() => updateBriefTemplate(storage, 'missing', 'New brief.'), /no longer exists/);
+  assert.throws(() => updateBriefTemplate(storage, 'customer_services', 'New brief.'), /no longer exists/);
+  const unavailable = { ...storage, setItem: () => { throw new Error('Storage full'); } };
+  assert.throws(() => updateBriefTemplate(unavailable, first.name, 'New brief.'), /Could not update/);
+  assert.throws(() => deleteBriefTemplate(unavailable, first.name), /Could not delete/);
+  assert.deepEqual(loadBriefTemplates(storage), [updated, second]);
+  assert.throws(() => deleteBriefTemplate(storage, 'missing'), /no longer exists/);
+  assert.throws(() => deleteBriefTemplate({ ...storage, getItem: () => '{' }, first.name), /No templates were changed/);
+  assert.deepEqual(deleteBriefTemplate(storage, first.name), [second]);
+  assert.deepEqual(loadBriefTemplates(storage), [second]);
+  assert.throws(() => updateBriefTemplate(storage, first.name, 'New brief.'), /no longer exists/);
+  assert.throws(() => deleteBriefTemplate(storage, first.name), /no longer exists/);
+  assert.deepEqual(deleteBriefTemplate(storage, second.name), []);
+  assert.deepEqual(loadBriefTemplates(storage), []);
 });
 
 test('a default brief persists verbatim and can be replaced without modifying named templates', () => {
@@ -267,7 +317,8 @@ test('generates on the configured Azure connection, reports failed locales, and 
   t.after(() => rm(root, { force: true, recursive: true }));
   const output = path.join(root, 'scripts');
   await mkdir(output);
-  const calls: { model: string; instructions: string; locale: string; speakers: number; style: string; contentBrief: string; previousScript?: GeneratedScript['utterances'] }[] = [];
+  const calls: { model: string; instructions: string; locale: string; speakers: number; utteranceCount: number; style: string; contentBrief: string; previousScript?: GeneratedScript['utterances'] }[] = [];
+  const customFormatBrief = 'Speakers: 2\nUtterances: 3\nWrite a short delivery dialogue.';
   const improvementCalls: { model: string; instructions: string; speakers: number; style: string; contentBrief: string }[] = [];
   const foundryEndpoint = 'https://script-test-responses.services.ai.azure.com/openai/v1/responses';
   const foundryCalls: string[] = [];
@@ -379,6 +430,8 @@ test('generates on the configured Azure connection, reports failed locales, and 
           : english && defaultAttempt === 2 ? `${text} [CALM] Hello again.`
           : text,
       }))
+      : spec.contentBrief === customFormatBrief
+      ? [{ speaker: 1, text: 'I can help.' }, { speaker: 2, text: 'My parcel is late.' }, { speaker: 1, text: 'I will check.' }]
       : spec.contentBrief === unlimitedCalmBrief
       ? Array.from({ length: 16 }, () => ({ speaker: 1, text: '[calm] Hello.' }))
       : [podcastBrief, narrativeBrief].includes(spec.contentBrief)
@@ -450,11 +503,22 @@ test('generates on the configured Azure connection, reports failed locales, and 
   assert.ok('script' in success);
   assert.deepEqual(success.script.utterances.map(item => item.speaker), [1, 2]);
   assert.ok('error' in limited && limited.locale === 'es-MX' && /rate limit/.test(limited.error));
-  assert.ok('error' in invalid && invalid.locale === 'de-DE' && /utterance count/.test(invalid.error));
+  assert.ok('error' in invalid && invalid.locale === 'de-DE' && /Expected 2 utterances, got 1/.test(invalid.error));
   assert.equal(calls.length, 3);
   assert.ok(calls.every(call => call.model === 'text-default' && call.style === brief.style.trim()
     && call.speakers === 2 && call.contentBrief === brief.prompt));
   assert.match(calls[0].locale, /fr-CA/);
+
+  const customResponse = await post('generate', { ...brief, speakers: 1, utteranceCount: 16, prompt: customFormatBrief });
+  assert.equal(customResponse.status, 200);
+  const [customResult]: ScriptGenerationResult = await customResponse.json();
+  assert.ok('script' in customResult);
+  assert.deepEqual(customResult.script.utterances.map(item => item.speaker), [1, 2, 1]);
+  const customCall = calls.find(call => call.contentBrief === customFormatBrief);
+  assert.equal(customCall?.speakers, 2);
+  assert.equal(customCall?.utteranceCount, 3);
+  assert.match(customCall?.instructions ?? '', /do not assume any other template/);
+  assert.doesNotMatch(customCall?.instructions ?? '', /Keep the four domains|all 16 agent utterances/);
 
   const realFetch = globalThis.fetch;
   const progressFetch = t.mock.method(globalThis, 'fetch', (input: string, init: RequestInit) => {

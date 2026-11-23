@@ -1,9 +1,12 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { activeDimensions, assessmentGaps, dimensionLabel, dimensions, ISSUE_RATING_THRESHOLD, summarize, type Dimension, type Job, type JudgeResult, type StoredClip, type Summary } from '../shared/domain';
 import { AudioPlayer } from './AudioPlayer';
+import { DisclosureControls, setDetailsOpen } from './DisclosureControls';
 
 type WindowEvidence = { clip: StoredClip; results: (JudgeResult | undefined)[] };
 type FileEvidence = { file: string; windows: WindowEvidence[] };
+type ExpansionCommand = { revision: number; open: boolean };
+const EvidenceExpansionContext = createContext<ExpansionCommand>({ revision: 0, open: false });
 const evidenceKey = ({ voice, role }: Pick<Summary, 'voice' | 'role'>) => JSON.stringify([voice, role]);
 
 export function voiceEvidenceGroups(job: Job) {
@@ -23,7 +26,12 @@ export function voiceEvidenceGroups(job: Job) {
 
 function Fold({ label, children, kind }: { label: ReactNode; children: () => ReactNode; kind: string }) {
   const [open, setOpen] = useState(false);
-  return <details className={`evidence-branch evidence-${kind}`} onToggle={({ target, currentTarget }) => {
+  const expansion = useContext(EvidenceExpansionContext);
+  const details = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (expansion.revision && details.current) details.current.open = expansion.open;
+  }, [expansion]);
+  return <details ref={details} className={`evidence-branch evidence-${kind}`} onToggle={({ target, currentTarget }) => {
     if (target !== currentTarget) return;
     if (!currentTarget.open) currentTarget.querySelectorAll('audio').forEach(audio => audio.pause());
     setOpen(currentTarget.open);
@@ -31,6 +39,41 @@ function Fold({ label, children, kind }: { label: ReactNode; children: () => Rea
     <summary>{label}</summary>
     {open && <div className="evidence-branch-body">{children()}</div>}
   </details>;
+}
+
+function changeExpansion(setExpansion: Dispatch<SetStateAction<ExpansionCommand>>, open: boolean) {
+  setExpansion(previous => ({ revision: previous.revision + 1, open }));
+}
+
+function VoiceRecordingGroup({ job, voice, role, files, summary, sectionExpansion }: {
+  job: Job; voice: string; role: StoredClip['role']; files: FileEvidence[]; summary: Summary | undefined;
+  sectionExpansion: ExpansionCommand;
+}) {
+  const [open, setOpen] = useState(false);
+  const content = useRef<HTMLDivElement>(null);
+  const panelId = `voice-recordings-${useId()}`;
+  const pauseAudio = () => content.current?.querySelectorAll('audio').forEach(audio => audio.pause());
+  useEffect(() => {
+    if (!sectionExpansion.revision) return;
+    if (!sectionExpansion.open) pauseAudio();
+    setOpen(sectionExpansion.open);
+  }, [sectionExpansion]);
+  return <EvidenceExpansionContext.Provider value={sectionExpansion}>
+    <div className="evidence-voice-group">
+      <div className="evidence-voice-row">
+        <button type="button" className="evidence-voice-toggle" aria-expanded={open} aria-controls={panelId}
+          onClick={() => {
+            if (open) pauseAudio();
+            setOpen(!open);
+          }}>
+          <span className="evidence-voice-label"><strong>{voice}</strong>{role !== 'speaker' && ` / ${role}`} · {files.length} audio {files.length === 1 ? 'file' : 'files'} · Voice average: {rating(summary?.score)}</span>
+        </button>
+      </div>
+      <div id={panelId} className="evidence-branch-body evidence-voice-content" ref={content} hidden={!open}>
+        {open && <VoiceRecordingList job={job} files={files} />}
+      </div>
+    </div>
+  </EvidenceExpansionContext.Provider>;
 }
 
 const windowLabel = (clip: StoredClip) => `${clip.start.toFixed(2)}–${clip.end.toFixed(2)} s · ${clip.channel}`;
@@ -67,42 +110,22 @@ const summarizeWindows = (job: Job, windows: WindowEvidence[]) => summarize({
 const lowestFirst = (a: number | null | undefined, b: number | null | undefined) =>
   (a ?? Infinity) - (b ?? Infinity);
 
-export function VoiceFileEvidence({ job, file }: { job: Job; file: FileEvidence }) {
+export function VoiceFilePlayback({ file }: { file: FileEvidence }) {
   const [selected, setSelected] = useState(file.windows[0].clip.id);
   const playback = useRef<HTMLDivElement>(null);
   const window = file.windows.find(({ clip }) => clip.id === selected) ?? file.windows[0];
   const { clip } = window;
-  const active = activeDimensions(job.profile);
-  const averages = summarizeWindows(job, [window])?.dimensions;
-  const orderedDimensions = [...dimensions].sort((a, b) => lowestFirst(averages?.[a], averages?.[b]));
-  return <>
-    <div className="evidence-playback" ref={playback}>
-      {file.windows.length > 1 ? <label>Evaluated audio window
-        <select value={clip.id} onChange={event => {
-          playback.current?.querySelector('audio')?.pause();
-          setSelected(event.target.value);
-        }}>
-          {file.windows.map(({ clip: item }) => <option key={item.id} value={item.id}>{windowLabel(item)}</option>)}
-        </select>
-      </label> : <small>Evaluated audio · {windowLabel(clip)}</small>}
-      <AudioPlayer key={clip.id} preload="none" src={`/api/clips/${clip.id}/audio`} label={`Evaluated audio: ${file.file}, ${windowLabel(clip)}`} />
-    </div>
-    <div className="evidence-panel">
-      <table className="evidence-comment-table">
-        <caption>All rubric dimensions</caption>
-        <thead><tr><th scope="col">Rubric dimension</th><th scope="col">Judge comments</th></tr></thead>
-        <tbody>
-          {orderedDimensions.map(dimension => <tr key={dimension}>
-            <th scope="row"><strong>{dimensionLabel(job.profile, dimension)}</strong>
-              <small>{averages?.[dimension] == null ? 'Not assessed' : `${rating(averages[dimension])} window average`}</small>
-              {dimension === 'audioQuality' && !active.includes(dimension) && <small>Diagnostic only</small>}
-            </th>
-            <td><JudgeComments job={job} window={window} dimension={dimension} detailed /></td>
-          </tr>)}
-        </tbody>
-      </table>
-    </div>
-  </>;
+  return <div className="evidence-playback" ref={playback}>
+    {file.windows.length > 1 ? <label>Evaluated audio window
+      <select value={clip.id} onChange={event => {
+        playback.current?.querySelector('audio')?.pause();
+        setSelected(event.target.value);
+      }}>
+        {file.windows.map(({ clip: item }) => <option key={item.id} value={item.id}>{windowLabel(item)}</option>)}
+      </select>
+    </label> : <small>Evaluated audio · {windowLabel(clip)}</small>}
+    <AudioPlayer key={clip.id} preload="none" src={`/api/clips/${clip.id}/audio`} label={`Evaluated audio: ${file.file}, ${windowLabel(clip)}`} />
+  </div>;
 }
 
 const belowThreshold = (score: number | null | undefined): score is number =>
@@ -117,27 +140,19 @@ export function VoiceTopIssues({ job, files, summary }: { job: Job; files: FileE
   }).sort((a, b) => a.score - b.score);
   if (!issues.length) return <p className="hint">No assessed dimension averages below 4.0 / 5.0.</p>;
 
-  const recordings = files.map(file => ({
-    ratings: summarizeWindows(job, file.windows)?.dimensions,
-    windows: file.windows.map(window => ({
-      window, ratings: file.windows.length === 1 ? undefined : summarizeWindows(job, [window])?.dimensions,
-    })),
-  }));
+  const windows = files.flatMap(file => file.windows.map(window => ({
+    window, ratings: summarizeWindows(job, [window])?.dimensions,
+  })));
 
   return <table className="evidence-comment-table evidence-top-issues">
     <caption>Top issues · Average below 4.0 / 5.0</caption>
-    <thead><tr><th scope="col">Rubric dimension</th><th scope="col">Representative audio &amp; judge comments</th></tr></thead>
+    <thead><tr><th scope="col">Rubric dimension</th><th scope="col">All below-threshold audio &amp; judge comments</th></tr></thead>
     <tbody>{issues.map(({ dimension, score }) => {
       const label = dimensionLabel(job.profile, dimension);
-      const examples = recordings.flatMap(({ ratings, windows }) => {
-        const fileScore = ratings?.[dimension];
-        if (!belowThreshold(fileScore)) return [];
-        const candidates = windows.flatMap(({ window, ratings: windowRatings }) => {
-          const windowScore = windows.length === 1 ? fileScore : windowRatings?.[dimension];
-          return belowThreshold(windowScore) ? [{ window, windowScore }] : [];
-        }).sort((a, b) => a.windowScore - b.windowScore);
-        return candidates.length ? [{ ...candidates[0], fileScore }] : [];
-      }).sort((a, b) => a.fileScore - b.fileScore).slice(0, 2);
+      const examples = windows.flatMap(({ window, ratings }) => {
+        const windowScore = ratings?.[dimension];
+        return belowThreshold(windowScore) ? [{ window, windowScore }] : [];
+      }).sort((a, b) => a.windowScore - b.windowScore);
       return <tr key={dimension}>
         <th scope="row"><strong>{label}</strong><small>{issueRating(score)} voice average</small></th>
         <td>{examples.map(({ window, windowScore }, index) => {
@@ -160,28 +175,46 @@ export function VoiceRecordingList({ job, files }: { job: Job; files: FileEviden
     .sort((a, b) => lowestFirst(a.score, b.score));
   return <>{recordings.map(({ file, score }) =>
     <Fold kind="file" key={file.file}
-      label={<><strong>{file.file}</strong> · {file.windows.length} {file.windows.length === 1 ? 'window' : 'windows'} · Recording average: {rating(score)}</>}>{() =>
-      <VoiceFileEvidence job={job} file={file} />
+      label={<><strong>{file.file}</strong> · Recording average: {rating(score)}</>}>{() =>
+      <VoiceRecordingEvidence file={file} />
     }</Fold>
   )}</>;
 }
 
-export function VoiceEvidenceTree({ job }: { job: Job }) {
+export function VoiceRecordingEvidence({ file }: { file: FileEvidence }) {
+  return <VoiceFilePlayback file={file} />;
+}
+
+export function VoiceEvidenceTree({ job, compact = false }: { job: Job; compact?: boolean }) {
+  const issuesSection = useRef<HTMLElement>(null);
+  const [recordingExpansion, setRecordingExpansion] = useState<ExpansionCommand>({ revision: 0, open: false });
   const summaries = new Map(summarize(job).map(summary => [evidenceKey(summary), summary]));
   const groups = voiceEvidenceGroups(job).map(group => ({ ...group, summary: summaries.get(evidenceKey(group)) }))
     .sort((a, b) => lowestFirst(a.summary?.score, b.summary?.score));
-  return <section id="voice-judge-evidence" className="card voice-evidence evidence-tree" aria-label="Voice top issues & judge evidence">
-    <h2>Voice top issues &amp; judge evidence</h2>
-    {job.profile.speakerMode === 'automatic' && <p className="hint">Audio contains the conversation, not an isolated target speaker.</p>}
-    {!groups.length && <p>No audio evidence is available yet.</p>}
-    {groups.map(({ voice, role, files, summary }) => <Fold kind="voice" key={JSON.stringify([job.id, voice, role])}
-      label={<><strong>{voice}</strong>{role !== 'speaker' && ` / ${role}`} · {files.length} audio {files.length === 1 ? 'file' : 'files'} · Voice average: {rating(summary?.score)}</>}>{() =>
-      <>
+  const issueGroups = groups.filter(({ summary }) =>
+    activeDimensions(job.profile).some(dimension => belowThreshold(summary?.dimensions[dimension])));
+  return <>
+    {!!issueGroups.length && <section ref={issuesSection} id="voice-judge-evidence" className={`card voice-evidence evidence-tree${compact ? ' evidence-tree--compact' : ''}`} aria-label="Voice top issues & judge evidence">
+      <div className="evidence-section-heading">
+        <h2>Voice top issues &amp; judge evidence</h2>
+        <DisclosureControls label="Voice top issues & judge evidence" onChange={open => setDetailsOpen(issuesSection.current, open)} />
+      </div>
+      {issueGroups.map(({ voice, role, files, summary }) => <Fold kind="voice" key={JSON.stringify([job.id, voice, role])}
+        label={<><strong>{voice}</strong>{role !== 'speaker' && ` / ${role}`} · {files.length} audio {files.length === 1 ? 'file' : 'files'} · Voice average: {rating(summary?.score)}</>}>{() =>
         <div className="evidence-panel evidence-top-panel"><VoiceTopIssues job={job} files={files} summary={summary} /></div>
-        <Fold kind="recordings" label={<strong>All recordings ({files.length})</strong>}>{() =>
-          <VoiceRecordingList job={job} files={files} />
-        }</Fold>
-      </>
-    }</Fold>)}
-  </section>;
+      }</Fold>)}
+    </section>}
+    <section id="all-recordings-per-voice" className={`card voice-evidence evidence-tree${compact ? ' evidence-tree--compact' : ''}`} aria-label="All recordings per voice">
+      <div className="evidence-section-heading">
+        <h2>All recordings per voice</h2>
+        <DisclosureControls label="All recordings per voice" onChange={open => changeExpansion(setRecordingExpansion, open)} />
+      </div>
+      {job.profile.speakerMode === 'automatic' && <p className="hint">Audio contains the conversation, not an isolated target speaker.</p>}
+      {!groups.length && <p>No recordings are available yet.</p>}
+      {voiceEvidenceGroups(job).map(({ voice, role, files }) =>
+        <VoiceRecordingGroup key={JSON.stringify([job.id, voice, role])} job={job} voice={voice} role={role}
+          files={files} summary={summaries.get(evidenceKey({ voice, role }))} sectionExpansion={recordingExpansion} />
+      )}
+    </section>
+  </>;
 }

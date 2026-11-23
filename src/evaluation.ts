@@ -18,6 +18,8 @@ export async function prepareEvaluationClips(
       await upload({
         id, voice: recording.voice, file: recording.path, role: region.role, start: region.start, end: region.end,
         channel: region.channel, language: resolveLanguageHint(recording.language, profile.language),
+        ...(recording.ssml ? { ssml: recording.ssml } : {}),
+        ...(recording.scriptText ? { referenceScript: recording.scriptText } : {}),
       }, base64(await audio.toPcm(buffer, region)));
       ids.push(id);
     }

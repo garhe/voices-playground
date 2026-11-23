@@ -7,6 +7,7 @@ import { contiguousWindows, type StoredClip, type VoiceGender } from '../shared/
 import { BatchImport } from './batch.js';
 import { realDirectory } from './localDirectory.js';
 import { decodeStudioText, parseStudioScript } from './studioScripts.js';
+import { exactStudioSsmlForAudios } from './studio.js';
 
 type Source = { path: string; size: number; mtimeMs: number };
 export class ArenaImport {
@@ -15,6 +16,7 @@ export class ArenaImport {
   private sources = new Map<string, Source>();
   private layout?: 'voices' | 'tests';
   private references = new Map<string, string>();
+  private exactSsml = new Map<string, string>();
 
   private async scriptMatcher(source: ArenaScriptSource) {
     const inputs = 'scriptsDirectory' in source ? [await realDirectory(source.scriptsDirectory)] : source.scriptPaths;
@@ -77,6 +79,7 @@ export class ArenaImport {
   async planUploads(input: unknown): Promise<ArenaPreview> {
     this.preview = undefined;
     this.references.clear();
+    this.exactSsml.clear();
     const request = arenaUploadSchema.parse(input);
     const match = await this.scriptMatcher(request);
     const matches = request.files.map(file => match(path.basename(file.path)));
@@ -97,6 +100,7 @@ export class ArenaImport {
   async plan(input: unknown): Promise<ArenaPreview> {
     this.preview = undefined;
     this.references.clear();
+    this.exactSsml.clear();
     const request = arenaImportSchema.parse(input);
     const root = await realDirectory('directory' in request ? request.directory : request.directories[0]);
     const matchScript = await this.scriptMatcher(request);
@@ -150,8 +154,24 @@ export class ArenaImport {
     }
     response.tests = [...groups.values()];
     if (!response.tests.length) throw new Error('No matching audio found inside voice/model folders.');
+    const files = response.tests.flatMap(test => test.files);
+    const lookup = request.layout === 'voices' ? files.flatMap(file => {
+      if (file.ssml) return [];
+      const source = this.sources.get(file.id)?.path;
+      return source ? [{ file, source }] : [];
+    }) : [];
+    const ssmlBySource = await exactStudioSsmlForAudios(lookup.map(item => item.source));
+    const lookupIndexByFile = new Map(lookup.map((item, index) => [item.file.id, index]));
     for (const test of response.tests) {
       if (test.name.length > 120) test.errors.push('Locale and domain together must be at most 120 characters.');
+    }
+    for (const file of files) {
+      const lookupIndex = lookupIndexByFile.get(file.id) ?? -1;
+      const ssml = file.ssml ?? (lookupIndex >= 0 ? ssmlBySource[lookupIndex] : undefined);
+      if (ssml) {
+        file.ssml = ssml;
+        this.exactSsml.set(JSON.stringify([file.path, file.voice]), ssml);
+      }
     }
     this.layout = request.layout;
     this.preview = response;
@@ -200,6 +220,16 @@ export class ArenaImport {
     for (const [key, group] of perFile) {
       const text = this.references.get(key);
       if (text && text.length <= 20000 && contiguousWindows(group)) for (const clip of group) result.set(clip.id, text);
+    }
+    return result;
+  }
+
+  ssmls(reference: ArenaReference, clips: StoredClip[]): Map<string, string> {
+    this.metadata(reference, clips);
+    const result = new Map<string, string>();
+    for (const clip of clips) {
+      const ssml = this.exactSsml.get(JSON.stringify([clip.file, clip.voice]));
+      if (ssml) result.set(clip.id, ssml);
     }
     return result;
   }

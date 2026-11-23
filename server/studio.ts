@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { access, link, lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
+import { access, link, lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,6 +16,73 @@ import { studioVoiceLocales } from '../shared/studioVoices.js';
 import { studioExpressionMarkup, studioSsml } from '../shared/studioSsml.js';
 
 export { studioSsml };
+
+function normalizedPath(file: string) {
+  const resolved = path.resolve(file);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function sha256File(file: string) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+export type ExactStudioAudioSource = { scriptText: string; ssml: string };
+export async function exactStudioAudioSourcesForAudios(audioPaths: readonly string[]): Promise<(ExactStudioAudioSource | undefined)[]> {
+  const absolutePaths = audioPaths.map(file => path.resolve(file));
+  const requested = new Set(absolutePaths.map(normalizedPath));
+  const outputFolders = new Set(absolutePaths.map(file => {
+    const voiceFolder = path.dirname(file);
+    const shallow = path.resolve(voiceFolder, '..', '..');
+    return path.basename(shallow).toLowerCase() === 'by-locale' ? path.resolve(shallow, '..') : shallow;
+  }));
+  const candidates = new Map<string, ({ hash: string } & ExactStudioAudioSource)[]>();
+  const reports = new Set<string>();
+  for (const output of outputFolders) {
+    let entries: string[];
+    try { entries = await readdir(output); }
+    catch (error) { if (missing(error)) continue; throw error; }
+    for (const name of entries.filter(value => /^run(?:-[\da-f-]{36})?\.json$/i.test(value))) {
+      const reportPath = path.join(output, name);
+      if (reports.has(normalizedPath(reportPath))) continue;
+      reports.add(normalizedPath(reportPath));
+      let stat;
+      try { stat = await lstat(reportPath); }
+      catch (error) { if (missing(error)) continue; throw error; }
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024 * 1024) continue;
+      const raw = await readFile(reportPath, 'utf8');
+      let value: unknown;
+      try { value = JSON.parse(raw); } catch { continue; }
+      const saved = savedRunSchema.safeParse(value);
+      if (!saved.success || normalizedPath(saved.data.output) !== normalizedPath(output) ||
+          (name !== 'run.json' && name !== `run-${saved.data.id}.json`)) continue;
+      for (const cell of saved.data.cells) {
+        const key = normalizedPath(cell.path);
+        const hash = cell.status === 'done' ? saved.data.audioHashes?.[cell.path] : undefined;
+        if (!requested.has(key) || !hash) continue;
+        const values = candidates.get(key) ?? [];
+        values.push({
+          hash, scriptText: cell.text,
+          ssml: studioSsml(cell.voice, cell.text, cell.locale, saved.data.settings.rate, saved.data.settings.pitch),
+        });
+        candidates.set(key, values);
+      }
+    }
+  }
+  return Promise.all(absolutePaths.map(async file => {
+    const values = candidates.get(normalizedPath(file));
+    if (!values?.length) return undefined;
+    const hash = await sha256File(file);
+    const matches = new Map(values.filter(value => value.hash === hash)
+      .map(value => [JSON.stringify([value.scriptText, value.ssml]), value]));
+    return matches.size === 1 ? [...matches.values()][0] : undefined;
+  }));
+}
+
+export async function exactStudioSsmlForAudios(audioPaths: readonly string[]): Promise<(string | undefined)[]> {
+  return (await exactStudioAudioSourcesForAudios(audioPaths)).map(source => source?.ssml);
+}
 
 type SpeechCredentials = { region: string; endpoint: string; key: string };
 const speechConnectionSchema = z.object({
@@ -38,6 +105,7 @@ const savedRunSchema = z.object({
   id: z.string().uuid(), status: z.enum(['running', 'pausing', 'paused', 'completed', 'cancelled', 'failed']),
   startedAt: z.string().datetime(), finishedAt: z.string().datetime().optional(), output: z.string(), byLocale: z.string(),
   error: z.string().optional(), settings: settingsSchema,
+  audioHashes: z.record(z.string().max(240), z.string().regex(/^[a-f\d]{64}$/i)).optional(),
   cells: z.array(studioClipSchema.omit({ name: true, source: true }).extend({
     id: z.string().uuid(), script: z.string().max(80), clip: z.string().refine(value => validStudioName(value, 100)),
     voice: studioVoiceSchema, locale: z.union([z.literal(''), studioLocaleCodeSchema]), path: z.string().max(240),
@@ -112,6 +180,7 @@ export class AzureVoicesStudio {
   private plans = new Map<string, { plan: StudioPlan; request: StudioPlanRequest; credentials: SpeechCredentials; fingerprints: Map<string, string> }>();
   private runs = new Map<string, StudioRun>();
   private runSettings = new Map<string, RunSettings>();
+  private audioHashes = new Map<string, Map<string, string>>();
   private cancelled = new Set<string>();
   private executing = new Set<string>();
   private finalizing = new Set<string>();
@@ -350,7 +419,8 @@ export class AzureVoicesStudio {
     const settings = { rate: request.rate, pitch: request.pitch, concurrency: request.concurrency, format: 'riff-24khz-16bit-mono-pcm' } as const;
     const run: StudioRun = { id, status: 'running', startedAt: new Date().toISOString(), output: plan.output, byLocale: plan.byLocale, cells: structuredClone(plan.cells), reportPath };
     this.runs.set(run.id, run);
-    try { await this.persist(run, settings); } catch (error) { this.runs.delete(run.id); throw error; }
+    this.audioHashes.set(run.id, new Map());
+    try { await this.persist(run, settings); } catch (error) { this.runs.delete(run.id); this.audioHashes.delete(run.id); throw error; }
     this.runSettings.set(run.id, settings);
     void this.execute(run, settings, credentials);
     return run;
@@ -392,7 +462,7 @@ export class AzureVoicesStudio {
       if (!/^run(?:-[\da-f-]{36})?\.json$/i.test(filename)) throw new Error('Select a Studio run.json or run-<id>.json report.');
       const stat = await lstat(reportPath);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024 * 1024) throw new Error('Select a regular Studio run report no larger than 256 MB.');
-      const { settings, ...data } = savedRunSchema.parse(JSON.parse(await readFile(reportPath, 'utf8')));
+      const { settings, audioHashes, ...data } = savedRunSchema.parse(JSON.parse(await readFile(reportPath, 'utf8')));
       if (filename !== 'run.json' && filename !== `run-${data.id}.json`) throw new Error('The saved report filename does not match its run ID.');
       const byLocale = filename === 'run.json' ? path.join(output, 'by-locale') : output;
       if (data.output !== output || data.byLocale !== byLocale) throw new Error('Reopen the report from its original output folder.');
@@ -420,6 +490,7 @@ export class AzureVoicesStudio {
       const run: StudioRun = { ...data, status: resumable ? 'paused' : ['running', 'pausing', 'paused'].includes(data.status) ? 'completed' : data.status, reportPath };
       this.runs.set(run.id, run);
       this.runSettings.set(run.id, settings);
+      this.audioHashes.set(run.id, new Map(Object.entries(audioHashes ?? {})));
       return run;
     } finally { this.starting = false; }
   }
@@ -457,7 +528,7 @@ export class AzureVoicesStudio {
     await realDirectory(run.output);
     if (!run.reportPath) throw new Error('The run report path is missing.');
     const tmp = path.join(run.output, `run.${run.id}.tmp`);
-    await writeFile(tmp, JSON.stringify({ ...run, settings: request }, null, 2), { mode: 0o600 });
+    await writeFile(tmp, JSON.stringify({ ...run, settings: request, audioHashes: Object.fromEntries(this.audioHashes.get(run.id) ?? []) }, null, 2), { mode: 0o600 });
     await rename(tmp, run.reportPath);
     const header = ['run_id', 'clip_name', 'script_name', 'line_no', 'text', 'locale', 'voice_short_name', 'gender', 'rate', 'pitch', 'characters', 'status', 'error', 'path_by_locale', 'language_fallback', 'requested_locale'];
     const rows = run.cells.map(cell => [run.id, cell.clip, cell.script, cell.line, cell.text, cell.locale || 'Auto', cell.voice.ShortName, cell.voice.Gender, request.rate, request.pitch, cell.text.length, cell.status, cell.error ?? '', cell.path,
@@ -519,6 +590,7 @@ export class AzureVoicesStudio {
                 await writeFile(temp, bytes, { flag: 'wx', mode: 0o600 });
                 await link(temp, cell.path);
               } finally { try { await unlink(temp); } catch (error) { if (!missing(error)) throw error; } }
+              this.audioHashes.get(run.id)?.set(cell.path, createHash('sha256').update(bytes).digest('hex'));
               cell.status = 'done';
             } catch (error) {
               cell.status = 'failed'; cell.error = `${errorText(error)}${generated ? ' Azure returned audio, so the request may have been billed even though saving failed.' : ''}`;

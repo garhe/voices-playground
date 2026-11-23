@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createElement } from 'react';
@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import ExcelJS from 'exceljs';
 import { ArenaImport } from '../server/arena.js';
 import { createApp } from '../server/app.js';
+import { studioSsml } from '../shared/studioSsml.js';
 import { renderShareScorecard, renderShareScorecardSnapshot, shareScorecardData } from '../server/shareScorecard.js';
 import { arenaData, arenaImportSchema, arenaScript, arenaUploadSchema, type ArenaData, type ArenaPreview } from '../shared/arena.js';
 import { parseSortingPaths } from '../shared/sorting.js';
@@ -27,9 +28,9 @@ import { ArenaVoiceReport } from '../src/ArenaVoiceReport.js';
 import { ArenaDimensionComparison } from '../src/ArenaDimensionComparison.js';
 import { ArenaScoreMatrix } from '../src/ArenaScoreMatrix.js';
 import { ArenaTestStatus } from '../src/ArenaTestStatus.js';
-import { VoiceEvidenceTree, VoiceFileEvidence, VoiceRecordingList, VoiceTopIssues, voiceEvidenceGroups } from '../src/VoiceEvidenceTree.js';
+import { VoiceEvidenceTree, VoiceFilePlayback, VoiceRecordingEvidence, VoiceRecordingList, VoiceTopIssues, voiceEvidenceGroups } from '../src/VoiceEvidenceTree.js';
 import { summarizeTtsIssues } from '../shared/ttsIssues.js';
-import { TestQueue, queueForWorkspace } from '../src/TestQueue.js';
+import { TestQueue } from '../src/TestQueue.js';
 import { arenaDetailMatches, arenaDetailOptions, arenaDetailSelectionForCell, arenaReportMatch, arenaVoiceName } from '../src/arenaDetails.js';
 import { createHistoryLoader, workspaceHistory } from '../src/historyLoader.js';
 import { AudioSelectionActions, EvaluationWorkbench, ttsIssueCsvRows, VoiceJudgeMatrix } from '../src/App.js';
@@ -189,6 +190,7 @@ function arenaJob(voice: string, locale: string, date: string, value: number, do
 
 test('Arena Excel export preserves visible order, numeric scores, and exact source evidence', async () => {
   const first = arenaJob(avaV3, 'en-US', '2026-02-01', 4.25);
+  first.clips[0].referenceScript = 'Hello from the source script.';
   first.collectVoiceDescriptors = true;
   first.results[0].assessment!.voiceDescriptors = descriptors;
   first.results[0].assessment!.reasons.naturalness = '=Saved listening comment';
@@ -200,7 +202,7 @@ test('Arena Excel export preserves visible order, numeric scores, and exact sour
   const reopened = new ExcelJS.Workbook();
   await reopened.xlsx.load(await book.xlsx.writeBuffer());
   assert.deepEqual(reopened.worksheets.map(sheet => sheet.name), [
-    'Scorecard', 'Voice details', 'Dimension scores', 'Recording scores', 'Judge assessments', 'Judge evidence',
+    'Scorecard', 'Voice details', 'Dimension scores', 'Recording scores', 'Judge assessments', 'Judge evidence', 'Audio Script',
   ]);
   const scorecard = reopened.getWorksheet('Scorecard')!;
   assert.equal(scorecard.getCell('B1').value, 'en-US');
@@ -214,6 +216,9 @@ test('Arena Excel export preserves visible order, numeric scores, and exact sour
   const assessments = reopened.getWorksheet('Judge assessments')!;
   assert.equal(assessments.getCell('M2').value, 4.25);
   assert.equal(assessments.getCell('N2').value, '=Saved listening comment');
+  const audioScript = reopened.getWorksheet('Audio Script')!;
+  assert.equal(audioScript.getCell('F2').value, 'Available');
+  assert.equal(audioScript.getCell('G2').value, first.clips[0].referenceScript);
   assert.throws(() => arenaWorkbook(config, new Map()), /Refresh the scorecard/);
 });
 
@@ -460,6 +465,13 @@ test('Arena detail report isolates the voice and locale and ranks saved dimensio
   assert.doesNotMatch(html, /OTHER VOICE EVIDENCE|OTHER PRIORITY EVIDENCE|other-voice.wav|DragonHDV3Neural/);
   assert.ok(html.indexOf('href="#arena-dimension-accentFit"') < html.indexOf('href="#arena-dimension-articulation"'));
   assert.match(html, /class="evidence-branch evidence-voice"/);
+  assert.match(html, /class="card voice-evidence evidence-tree evidence-tree--compact"/);
+  assert.match(html, /aria-label="Why these scores controls"/);
+  assert.match(html, /aria-label="Voice top issues &amp; judge evidence controls"/);
+  assert.match(html, /aria-label="All recordings per voice controls"/);
+  assert.match(html, /aria-label="Scoring gaps and limitations controls"/);
+  assert.match(html, /<details class="arena-judge-evidence"><summary><strong>Judge 1 · [^<]+<\/strong><\/summary><article>/);
+  assert.doesNotMatch(html, /<details class="arena-judge-evidence" open/);
   assert.doesNotMatch(html, /aria-label="Recording breakdown"|<audio\b/);
   assert.match(html, /Open full test report|No precise defect timestamp|Judge 1|Judge 2/);
 });
@@ -484,6 +496,12 @@ test('Voice evidence groups files by voice and role, sorts windows, and preserve
   const otherRole = clip({ voice: 'Voice B', role: 'agent', file: 'test-2.wav' });
   const saved = job([later, another, otherVoice, earlier, otherRole], [3, 4, 5]);
   saved.results = saved.results.filter(result => result.clipId !== earlier.id || result.judgeId !== saved.judges[1].id).reverse();
+  const assessment = saved.results.find(result => result.clipId === earlier.id && result.judgeId === saved.judges[0].id)!.assessment!;
+  assessment.reasons.naturalness = 'Judge heard an abrupt transition.';
+  assessment.rehearsalCases = [{
+    dimension: 'naturalness', cue: 'First pause', observation: 'Abrupt transition.',
+    direction: 'Smooth the transition.', check: 'Continuous phrasing on replay.',
+  }];
   const groups = voiceEvidenceGroups(saved);
   assert.deepEqual(groups.map(({ voice, role }) => [voice, role]), [['Voice A', 'speaker'], ['Voice B', 'agent'], ['Voice B', 'speaker']]);
   assert.deepEqual(groups[2].files.map(file => file.file), ['test-2.wav', 'test-10.wav']);
@@ -491,20 +509,49 @@ test('Voice evidence groups files by voice and role, sorts windows, and preserve
   assert.deepEqual(windows.map(window => window.clip.id), [earlier.id, later.id]);
   assert.deepEqual(windows[0].results.map(result => result?.judgeId), [saved.judges[0].id, undefined, saved.judges[2].id]);
   const html = renderToStaticMarkup(createElement(VoiceEvidenceTree, { job: saved }));
-  assert.match(html, /id="voice-judge-evidence"/);
-  assert.equal((html.match(/evidence-branch evidence-voice/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /id="voice-judge-evidence"/);
+  assert.match(html, /id="all-recordings-per-voice"[^>]*aria-label="All recordings per voice"/);
+  const recordings = html.split('<section id="all-recordings-per-voice"')[1];
+  assert.equal((recordings.match(/class="evidence-voice-row"/g) ?? []).length, groups.length);
+  assert.equal((recordings.match(/class="evidence-voice-toggle"/g) ?? []).length, groups.length);
+  assert.equal((recordings.match(/>Expand all<\/button>/g) ?? []).length, 1);
+  assert.equal((recordings.match(/>Collapse all<\/button>/g) ?? []).length, 1);
+  assert.equal((recordings.match(/class="evidence-voice-row"><button[^>]*class="evidence-voice-toggle"[\s\S]*?<\/button><div class="button-row evidence-tree-actions"/g) ?? []).length, 0);
+  assert.equal((recordings.match(/aria-controls="voice-recordings-/g) ?? []).length, groups.length);
+  assert.doesNotMatch(recordings, /evidence-branch evidence-voice/);
+  const voiceAverage = summarize(saved).find(summary => summary.voice === 'Voice B' && summary.role === 'speaker')!.score!;
+  assert.ok(recordings.includes(`<strong>Voice B</strong> · 2 audio files · Voice average: ${voiceAverage.toFixed(2)}/5`));
   assert.doesNotMatch(html, /<audio\b|test-2\.wav|Listen, inspect, decide/);
 
-  const fileHtml = renderToStaticMarkup(createElement(VoiceFileEvidence, { job: saved, file: groups[2].files[0] }));
+  const fileHtml = renderToStaticMarkup(createElement(VoiceFilePlayback, { file: groups[2].files[0] }));
   assert.equal((fileHtml.match(/<audio\b/g) ?? []).length, 1);
-  assert.ok(fileHtml.indexOf(`<audio controls="" preload="none" src="/api/clips/${earlier.id}/audio"`) < fileHtml.indexOf('<table'));
+  assert.ok(fileHtml.includes(`<audio controls="" preload="none" src="/api/clips/${earlier.id}/audio"`));
   assert.ok(fileHtml.includes(`<option value="${earlier.id}" selected="">0.00–5.00 s`));
   assert.ok(fileHtml.includes(`<option value="${later.id}">5.00–8.00 s`));
-  assert.match(fileHtml, /<caption>All rubric dimensions<\/caption><thead><tr><th scope="col">Rubric dimension<\/th><th scope="col">Judge comments<\/th><\/tr><\/thead>/);
-  const naturalness = fileHtml.match(/<strong>Naturalness<\/strong>.*?<\/tr>/)?.[0] ?? '';
-  assert.match(naturalness, /<small>Not assessed<\/small>.*Judge 1 \(3\.00\/5\).*Judge 2 \(Not assessed\).*No assessment saved \(missing\).*Judge 3 \(5\.00\/5\)/);
-  assert.equal((fileHtml.match(/<th scope="row">/g) ?? []).length, 7);
-  assert.doesNotMatch(fileHtml, /evidence-domain|Domain: Not assigned|Observations, limitations|Audio input, reference/);
+  assert.doesNotMatch(fileHtml, /evidence-panel|All rubric dimensions|Judge comments|Judge 1/);
+});
+
+test('voice top issues omits rows without an active below-threshold domain average', () => {
+  const low = clip({ voice: 'Voice with issue', file: 'low.wav' });
+  const high = clip({ voice: 'Voice without issue', file: 'high.wav' });
+  const saved = job([low, high], [4.5, 4.5]);
+  for (const result of saved.results) {
+    const scores = result.assessment!.scores;
+    for (const dimension of Object.keys(scores) as (keyof typeof scores)[]) scores[dimension] = 4.5;
+    if (result.clipId === low.id) scores.naturalness = 3.5;
+  }
+  const html = renderToStaticMarkup(createElement(VoiceEvidenceTree, { job: saved }));
+  const issues = html.split('<section id="all-recordings-per-voice"')[0];
+  assert.match(issues, /Voice with issue/);
+  assert.doesNotMatch(issues, /Voice without issue/);
+  assert.equal((issues.match(/>Expand all<\/button>/g) ?? []).length, 1);
+  assert.equal((issues.match(/>Collapse all<\/button>/g) ?? []).length, 1);
+
+  for (const result of saved.results) result.assessment!.scores.naturalness = 4.5;
+  const noIssues = renderToStaticMarkup(createElement(VoiceEvidenceTree, { job: saved }));
+  assert.doesNotMatch(noIssues, /id="voice-judge-evidence"/);
+  assert.match(noIssues, /id="all-recordings-per-voice"/);
+  assert.match(noIssues, /Voice with issue<\/strong> · 1 audio file · Voice average: 4\.50\/5/);
 });
 
 test('Audio list offers both bulk actions and disables redundant or busy actions', () => {
@@ -537,36 +584,41 @@ test('All recordings sorts recordings and window dimensions by average, lowest f
   assert.notEqual(average, summarize({ ...firstFile, clips: [first] })[0].score);
   assert.ok(average != null);
   const list = renderToStaticMarkup(createElement(VoiceRecordingList, { job: saved, files }));
-  assert.ok(list.includes(`first.wav</strong> · 2 windows · Recording average: ${average.toFixed(2)}/5`));
-  assert.ok(list.includes('incomplete.wav</strong> · 1 window · Recording average: Not assessed'));
   assert.deepEqual([...list.matchAll(/<summary><strong>(.*?)<\/strong>/g)].map(([, name]) => name),
     ['weak.wav', 'first.wav', 'incomplete.wav']);
-  const html = renderToStaticMarkup(createElement(VoiceFileEvidence, { job: saved, file: files[0] }));
-  const rows = [...html.matchAll(/<th scope="row"><strong>(.*?)<\/strong><small>(.*?)<\/small>/g)];
-  assert.deepEqual(rows.slice(0, 2).map(([, label, score]) => [label, score]), [
-    ['Articulation', '2.00/5 window average'], ['Pace &amp; rhythm', '3.00/5 window average'],
-  ]);
-  assert.ok(rows.findIndex(([, , score]) => score === 'Not assessed') > rows.findIndex(([, label]) => label === 'Naturalness'));
+  assert.ok(list.includes(`<strong>first.wav</strong> · Recording average: ${average.toFixed(2)}/5`));
+  assert.ok(list.includes('<strong>incomplete.wav</strong> · Recording average: Not assessed'));
+  const firstRecording = renderToStaticMarkup(createElement(VoiceRecordingEvidence, { file: files[0] }));
+  assert.ok(firstRecording.indexOf('class="evidence-playback"') >= 0);
+  assert.doesNotMatch(firstRecording, /Recording average:/);
+  assert.doesNotMatch(firstRecording, /Overall judge score by domain|Articulation|Pace &amp; rhythm/);
+  const playback = renderToStaticMarkup(createElement(VoiceFilePlayback, { file: files[0] }));
+  assert.ok(playback.includes(`/api/clips/${first.id}/audio`));
+  assert.doesNotMatch(playback, /All rubric dimensions|Judge comments|Naturalness/);
 });
 
-test('Voice top issues shows only averages below four, lowest first, with two distinct recordings and panel comments', () => {
+test('Voice top issues shows every window below four, lowest first, with matching panel comments', () => {
   const clips = [
     clip({ file: 'a.wav', start: 0, end: 5 }),
     clip({ file: 'a.wav', start: 5, end: 10 }),
     clip({ file: 'b.wav' }),
     clip({ file: 'c.wav' }),
+    clip({ file: 'mixed.wav', start: 0, end: 5 }),
+    clip({ file: 'mixed.wav', start: 5, end: 10 }),
+    clip({ file: 'near-boundary.wav' }),
     clip({ file: 'boundary.wav' }),
+    clip({ file: 'unassessed.wav' }),
   ];
   const saved = job(clips, [4, 4, 4]);
   saved.profile = { ...saved.profile, stage: 'tts', rubric: ARENA_RUBRIC };
-  const scores = [2, 1, 2.5, 3, 4];
+  const scores = [2, 1, 2.5, 3, 3.75, 4.75, 3.999, 4, null];
   for (const result of saved.results) {
     const index = clips.findIndex(clip => clip.id === result.clipId);
     const judge = saved.judges.findIndex(judge => judge.id === result.judgeId);
     const assessment = result.assessment!;
     assessment.scores.naturalness = scores[index];
-    assessment.scores.articulation = index === 4 ? 4 : 3.5;
-    assessment.reasons.naturalness = `Naturalness comment ${judge + 1}`;
+    assessment.scores.articulation = 3.5;
+    assessment.reasons.naturalness = `Window ${index + 1}, judge ${judge + 1}`;
   }
   const files = voiceEvidenceGroups(saved)[0].files;
   const summary = summarize(saved)[0];
@@ -574,11 +626,14 @@ test('Voice top issues shows only averages below four, lowest first, with two di
   const lowFirst = html.indexOf('<strong>Naturalness</strong>');
   assert.ok(lowFirst >= 0 && lowFirst < html.indexOf('<strong>Pronunciation accuracy</strong>'));
   const naturalness = html.slice(lowFirst, html.indexOf('</tr>', lowFirst));
-  assert.equal((naturalness.match(/<audio\b/g) ?? []).length, 2);
-  assert.ok(naturalness.includes(`/api/clips/${clips[1].id}/audio`));
-  assert.ok(naturalness.includes(`/api/clips/${clips[2].id}/audio`));
-  assert.doesNotMatch(naturalness, /c\.wav|boundary\.wav/);
-  for (const judge of [1, 2, 3]) assert.match(naturalness, new RegExp(`Naturalness comment ${judge}`));
+  const qualifying = [1, 0, 2, 3, 4, 6];
+  assert.deepEqual([...naturalness.matchAll(/src="\/api\/clips\/([^"]+)\/audio"/g)].map(([, id]) => id),
+    qualifying.map(index => clips[index].id));
+  assert.match(naturalness, /Below 4\.00\/5 window average/);
+  for (const [position, index] of qualifying.entries()) {
+    const example = naturalness.split('class="evidence-top-example"')[position + 1];
+    for (const judge of [1, 2, 3]) assert.match(example, new RegExp(`Window ${index + 1}, judge ${judge}`));
+  }
   assert.doesNotMatch(html, /<strong>Pace &amp; rhythm<\/strong>/);
   const noIssues = renderToStaticMarkup(createElement(VoiceTopIssues, { job: saved, files, summary: undefined }));
   assert.match(noIssues, /No assessed dimension averages below 4.0/);
@@ -691,7 +746,7 @@ test('Arena compares distinct dimension scores for the latest eligible run of ea
   }
   const cells = arenaData([english, french, alternate, newerIncomplete]).cells;
   assert.equal(cells.length, 3);
-  const html = renderToStaticMarkup(createElement(ArenaDimensionComparison, { cells, busy: false, onInspect: () => {} }));
+  const html = renderToStaticMarkup(createElement(ArenaDimensionComparison, { cells, busy: false, load: async () => english, onInspect: () => {} }));
   assert.match(html, /<table aria-label="Full-panel scores out of 5">/);
   assert.doesNotMatch(html, /<caption\b/);
   for (const label of ['Voice', 'Model', 'Script locale', 'Gender', 'Overall preference', 'Naturalness'])
@@ -707,7 +762,7 @@ test('Arena compares distinct dimension scores for the latest eligible run of ea
   assert.match(html, /Not assessed/);
   assert.doesNotMatch(html, /Unavailable/);
   const legacy = renderToStaticMarkup(createElement(ArenaDimensionComparison, {
-    cells: [{ ...cells[0], dimensionScores: undefined }], busy: false, onInspect: () => {},
+    cells: [{ ...cells[0], dimensionScores: undefined }], busy: false, load: async () => english, onInspect: () => {},
   }));
   assert.match(legacy, /Some dimension scores are unavailable.*<td>Unavailable<\/td>/);
   assert.ok(legacy.includes(`<td><strong>${cells[0].score.toFixed(2)}</strong></td><td>Unavailable</td>`));
@@ -796,7 +851,7 @@ test('Arena combines selected values without merging scorecards or breakdown row
     domain: ['customer_services', 'narration'], voice: [], model: [], locale: ['en-US', 'de-DE'],
   });
   assert.deepEqual(new Set(cells.map(cell => cell.jobId)), new Set(jobs.slice(0, 3).map(job => job.id)));
-  const comparison = renderToStaticMarkup(createElement(ArenaDimensionComparison, { cells, busy: false, onInspect: () => {} }));
+  const comparison = renderToStaticMarkup(createElement(ArenaDimensionComparison, { cells, busy: false, load: async () => jobs[0], onInspect: () => {} }));
   assert.match(comparison, /<span>Domain<\/span>/);
   for (const [domain, expected, other] of [['customer_services', '4.25', '3.75'], ['narration', '3.75', '4.25']]) {
     const matrix = renderToStaticMarkup(createElement(ArenaScoreMatrix, {
@@ -818,6 +873,9 @@ test('Arena matrix opens the configured external snapshot and keeps Excel export
   const html = renderToStaticMarkup(createElement(ArenaScoreMatrix, { ...props, externalUrl: publishedUrl }));
   assert.match(html, /<a class="secondary" href="https:\/\/example\.github\.io\/voices\/scorecard\/" target="_blank" rel="noopener noreferrer"[^>]*>Share External<\/a>/);
   assert.match(html, /<button[^>]*>Export to Excel<\/button>/);
+  const filtered = renderToStaticMarkup(createElement(ArenaScoreMatrix, { ...props, externalUrl: `${publishedUrl}?domain=stale`,
+    sharedDomains: ['customer_services', 'retail & banking'] }));
+  assert.match(filtered, /href="https:\/\/example\.github\.io\/voices\/scorecard\/\?domain=customer_services&amp;domain=retail\+%26\+banking"/);
   for (const externalUrl of ['', 'https://', 'file:///scorecard/index.html', 'https://user:password@example.com/']) {
     const unavailable = renderToStaticMarkup(createElement(ArenaScoreMatrix, { ...props, externalUrl }));
     assert.match(unavailable, /<button[^>]* disabled=""[^>]*>Share External<\/button>/);
@@ -827,7 +885,7 @@ test('Arena matrix opens the configured external snapshot and keeps Excel export
 test('Arena comparison uses the parent-selected view without a separate filter control', () => {
   const result = arenaJob(avaLatest, 'en-US', '2026-02-01', 4.6);
   const cells = arenaData([result]).cells.map(cell => ({ ...cell, voiceDescriptors: { ...descriptors, tone: null } }));
-  const props = { cells, busy: false, onInspect: () => {} };
+  const props = { cells, busy: false, onInspect: () => {}, load: async () => result };
   const scores = renderToStaticMarkup(createElement(ArenaDimensionComparison, { ...props, view: 'scores' }));
   const labels = renderToStaticMarkup(createElement(ArenaDimensionComparison, { ...props, view: 'descriptors' }));
   assert.match(scores, /aria-label="Full-panel scores out of 5"/);
@@ -845,6 +903,7 @@ test('Arena comparison uses the parent-selected view without a separate filter c
 
 test('Arena comparison Excel exports the selected view and preserves row order and cell types', async () => {
   const first = arenaJob(avaV3, 'en-US', '2026-02-01', 4.25);
+  first.clips[0].referenceScript = 'First source script.';
   const second = arenaJob(avaLatest, 'de-DE', '2026-02-02', 3.75);
   const cells = arenaData([first, second]).cells;
   const firstCell = cells.find(cell => cell.jobId === first.id)!;
@@ -853,10 +912,11 @@ test('Arena comparison Excel exports the selected view and preserves row order a
     { ...firstCell, voiceDescriptors: { ...descriptors, tone: null } },
     { ...secondCell, dimensionScores: undefined },
   ];
+  const jobs = new Map([[first.id, first], [second.id, second]]);
   for (const view of ['scores', 'descriptors'] as const) {
     const reopened = new ExcelJS.Workbook();
-    await reopened.xlsx.load(await arenaComparisonWorkbook(rows, view).xlsx.writeBuffer());
-    assert.deepEqual(reopened.worksheets.map(sheet => sheet.name), [view === 'scores' ? 'Scores' : 'Voice descriptors']);
+    await reopened.xlsx.load(await arenaComparisonWorkbook(rows, view, jobs).xlsx.writeBuffer());
+    assert.deepEqual(reopened.worksheets.map(sheet => sheet.name), [view === 'scores' ? 'Scores' : 'Voice descriptors', 'Audio Script']);
     const sheet = reopened.worksheets[0];
     assert.equal(sheet.rowCount, 3);
     assert.equal(sheet.getCell('A2').value, arenaVoiceName(firstCell.voice));
@@ -871,6 +931,10 @@ test('Arena comparison Excel exports the selected view and preserves row order a
       assert.equal(sheet.getCell('F2').value, 'Not assessable');
       assert.equal(sheet.getCell('E3').value, 'Not collected');
     }
+    const audioScript = reopened.getWorksheet('Audio Script')!;
+    assert.equal(audioScript.rowCount, 3);
+    assert.equal(audioScript.getCell('G2').value, first.clips[0].referenceScript);
+    assert.equal(audioScript.getCell('F3').value, 'Unavailable — source script text not retained');
   }
 });
 
@@ -885,13 +949,12 @@ test('Arena test status uses live FIFO order, retains finished reports, and excl
   const second = saved('Second waiting', 'service', 'queued');
   const stale = saved('Stale running', 'service', 'running');
   const entry = (run: Job) => ({ id: run.id, name: run.name! });
-  const state = queueForWorkspace({
+  const state: TestQueueState = {
     paused: true, active: { ...entry(running), workspace: 'arena', retry: true, autoRetryCount: 2 },
     waiting: [
-      { id: 'scoring', name: 'Scoring only', workspace: 'scoring' },
-      entry(first), { ...entry(second), workspace: 'arena' },
+      { ...entry(first), workspace: 'arena' }, { ...entry(second), workspace: 'arena' },
     ],
-  }, [testHistory(first)], 'arena').state;
+  };
   const html = renderToStaticMarkup(createElement(ArenaTestStatus, {
     reports: arenaData([done, interrupted, second, first, running, stale]).reports,
     reportsLoaded: true, queue: state, busy: false, onOpen: () => {}, onDelete: () => {},
@@ -903,7 +966,7 @@ test('Arena test status uses live FIFO order, retains finished reports, and excl
   assert.match(rows[1][2], /Queued.*Arena queue #1/);
   assert.match(rows[1][2], /en-US_narration\.txt/);
   assert.match(rows[2][2], /Queued.*Arena queue #2/);
-  assert.match(html, /1 running · 2 queued · Shared queue paused · 1 completed/);
+  assert.match(html, /1 running · 2 queued · Queue paused · 1 completed/);
   assert.match(rows.find(row => row[1] === 'Done report')![2], /Completed.*Open report/);
   assert.match(rows.find(row => row[1] === 'Interrupted report')![2], /Interrupted/);
   assert.match(rows.find(row => row[1] === 'Stale running')![2], /Updating status/);
@@ -915,14 +978,13 @@ test('Arena test status uses live FIFO order, retains finished reports, and excl
   assert.doesNotMatch(html, /Scoring only/);
 });
 
-test('Arena status embeds the complete New Test queue card with the same workspace filtering', () => {
+test('Arena status embeds the complete Arena queue card', () => {
   const first = arenaJob(avaLatest, 'en-US', '2026-01-01', 4, 'service');
   first.name = 'First waiting';
   const last = arenaJob(avaLatest, 'fr-FR', '2026-01-02', 4, 'narration');
   last.name = 'Last waiting';
   const queue: TestQueueState = { paused: true, active: { id: 'active', name: 'Running', workspace: 'arena' }, waiting: [
     { id: first.id, name: first.name, workspace: 'arena' },
-    { id: 'scoring', name: 'Scoring test', workspace: 'scoring' },
     { id: last.id, name: last.name, workspace: 'arena', retry: true, autoRetryCount: 2 },
   ] };
   const panel = (state: TestQueueState, busy = false) => createElement(TestQueue, {
@@ -932,7 +994,7 @@ test('Arena status embeds the complete New Test queue card with the same workspa
     const newTest = renderToStaticMarkup(panel(state, busy));
     const html = renderToStaticMarkup(createElement(ArenaTestStatus, {
       reports: arenaData([last, first]).reports, reportsLoaded: true,
-      queue: queueForWorkspace(state, [], 'arena').state, queuePanel: panel(state, busy),
+      queue: state, queuePanel: panel(state, busy),
       busy, onOpen: () => {}, onDelete: () => {},
     }));
     assert.ok(newTest, 'New Test queue should be visible');
@@ -940,10 +1002,10 @@ test('Arena status embeds the complete New Test queue card with the same workspa
     return newTest;
   };
   const card = queueDetails(queue);
-  assert.match(card, /<strong>Test queue<\/strong>.*Running: Running · 2 waiting · 1 other or unclassified waiting · Paused/);
+  assert.match(card, /<strong>Arena test queue<\/strong>.*Running: Running · 2 waiting · Paused/);
   assert.match(card, /Cancel running test/);
   assert.match(card, /Start queue/);
-  assert.match(card, /Queue controls apply to both/);
+  assert.match(card, /Queue controls apply only to this workspace/);
   assert.match(card, /<summary>Waiting tests \(2\)<\/summary>/);
   assert.match(card, /aria-label="Waiting tests in queue order"/);
   assert.deepEqual([...card.matchAll(/<span title="([^"]+)">/g)].map(match => match[1]), ['First waiting', 'Last waiting']);
@@ -1115,8 +1177,12 @@ test('TTS findings matrix combines judges in each voice row and keeps detailed e
   assert.equal(flags('audioQuality'), 0);
   for (const domain of voice.domainStats) assert.equal(domain.average, panelBefore[0].dimensions[domain.dimension]);
 
+  const exportJob = structuredClone(saved);
+  const firstAudio = exportJob.clips[0];
+  const scriptText = 'Exact text from the source script.';
+  for (const clip of exportJob.clips) if (clip.file === firstAudio.file && clip.voice === firstAudio.voice) clip.referenceScript = scriptText;
   const reopened = new ExcelJS.Workbook();
-  await reopened.xlsx.load(await ttsDetailsWorkbook(voices, saved.id).xlsx.writeBuffer());
+  await reopened.xlsx.load(await ttsDetailsWorkbook(voices, saved.id, exportJob).xlsx.writeBuffer());
   const sheet = reopened.getWorksheet('TTS review details')!;
   const detailRows = sheet.getRows(2, sheet.actualRowCount - 1)!;
   const excelCase = detailRows.find(row => row.getCell(15).value === 'Opening words')!;
@@ -1125,6 +1191,10 @@ test('TTS findings matrix combines judges in each voice row and keeps detailed e
   assert.equal(excelCase.getCell(10).value, 2);
   assert.equal(excelCase.getCell(11).value, 6);
   assert.equal(excelCase.getCell(14).value, 'Rushed words on an incomplete file.');
+  const audioScript = reopened.getWorksheet('Audio Script')!;
+  assert.equal(audioScript.getCell('F2').value, 'Available');
+  assert.equal(audioScript.getCell('G2').value, scriptText);
+  assert.equal(audioScript.getCell('F3').value, 'Unavailable — source script text not retained');
   assert.equal(excelCase.getCell(16).value, 'Incomplete');
   assert.equal(detailRows.filter(row => row.getCell(6).value === 'priority_feedback').length, 26);
 
@@ -1383,6 +1453,40 @@ test('Arena script sources deduplicate paths and reject invalid or ambiguous inp
     assert.equal(arenaUploadSchema.safeParse({ scriptPaths: ['""'], files: [source] }).success, false);
     assert.equal(arenaUploadSchema.safeParse({ scriptPaths: [english], scriptsDirectory: directory, files: [source] }).success, false);
     assert.equal(arenaImportSchema.safeParse({ directory: root, scriptPaths: [english], layout: 'voices', extra: true }).success, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Arena imports retain exact Studio SSML only when the generated audio still matches its saved hash', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-arena-ssml-'));
+  try {
+    const output = path.join(root, 'studio-run');
+    const audio = await file(output, `by-locale/en-US Female/${avaLatest.replace(':', '%3A')}/en-US_Customer_Services_L001.wav`, 'synthesized audio');
+    const scriptDirectory = path.join(root, 'scripts');
+    await file(scriptDirectory, 'en-US_Customer_Services.txt', 'Hello there.');
+    const voice = { ShortName: avaLatest, DisplayName: 'Ava', Locale: 'en-US', Gender: 'Female', SecondaryLocaleList: [] };
+    const ssml = studioSsml(voice, 'Hello there.', 'en-US', 0, 0);
+    await writeFile(path.join(output, 'run.json'), JSON.stringify({
+      id: randomUUID(), status: 'completed', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      output, byLocale: path.join(output, 'by-locale'),
+      settings: { rate: 0, pitch: 0, concurrency: 1, format: 'riff-24khz-16bit-mono-pcm' },
+      audioHashes: { [audio]: createHash('sha256').update(await readFile(audio)).digest('hex') },
+      cells: [{
+        id: randomUUID(), script: 'en-US_Customer_Services', clip: 'en-US_Customer_Services_L001', line: 1,
+        text: 'Hello there.', voice, locale: 'en-US', path: audio, status: 'done',
+      }],
+    }));
+    const importer = new ArenaImport();
+    const preview = await importer.plan({ directory: path.join(output, 'by-locale', 'en-US Female'), scriptsDirectory: scriptDirectory, layout: 'voices' });
+    const source = preview.tests[0].files[0];
+    const clipData = clip({ file: source.path, voice: avaLatest });
+    const exact = importer.ssmls({ token: preview.token, testName: preview.tests[0].name }, [clipData]);
+    assert.equal(exact.get(clipData.id), ssml);
+    await writeFile(audio, 'changed audio');
+    const changedImporter = new ArenaImport();
+    const changedPreview = await changedImporter.plan({ directory: path.join(output, 'by-locale', 'en-US Female'), scriptsDirectory: scriptDirectory, layout: 'voices' });
+    const changedSource = changedPreview.tests[0].files[0];
+    const changedClip = clip({ file: changedSource.path, voice: avaLatest });
+    assert.equal(changedImporter.ssmls({ token: changedPreview.token, testName: changedPreview.tests[0].name }, [changedClip]).size, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -10,7 +10,7 @@ export function TtsDetailsExport({ job }: { job: Job }) {
     setExporting(true);
     try {
       const { exportTtsDetailsWorkbook } = await import('./arenaExcel');
-      await exportTtsDetailsWorkbook(summarizeTtsIssues(job), job.id);
+      await exportTtsDetailsWorkbook(summarizeTtsIssues(job), job.id, job);
     } catch (cause) {
       setError(`Could not export the detailed report: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {

@@ -3,13 +3,19 @@ import type { ArenaCell } from '../shared/arena';
 import type { Job } from '../shared/domain';
 import { useTableSort } from './TableSort';
 
-export function ArenaScoreMatrix({ domain, cells, locales, load, onInspect, busy,
+export function ArenaScoreMatrix({ domain, cells, locales, load, onInspect, busy, sharedDomains = [],
   externalUrl = import.meta.env?.VITE_ARENA_EXTERNAL_SCORECARD_URL }: {
   domain: string; cells: ArenaCell[]; locales: string[]; load: (id: string) => Promise<Job>;
   onInspect: (cell: ArenaCell) => void; busy: boolean; externalUrl?: string;
+  /** Domains the published scorecard should be limited to; empty shares every domain. */
+  sharedDomains?: readonly string[];
 }) {
   const configuredUrl = externalUrl?.trim();
   const parsedUrl = configuredUrl?.startsWith('https://') ? URL.parse(configuredUrl) : null;
+  if (parsedUrl) {
+    parsedUrl.searchParams.delete('domain');
+    for (const shared of sharedDomains) parsedUrl.searchParams.append('domain', shared);
+  }
   const shareUrl = parsedUrl?.protocol === 'https:' && !parsedUrl.username && !parsedUrl.password ? parsedUrl.href : undefined;
   const sort = useTableSort({ key: 'voice', direction: 'ascending' });
   const [exporting, setExporting] = useState(false);

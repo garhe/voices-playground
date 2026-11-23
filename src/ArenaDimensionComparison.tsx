@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import { useTableSort } from './TableSort';
 import type { ArenaCell } from '../shared/arena';
-import { ARENA_RUBRIC, dimensionLabel, dimensions } from '../shared/domain';
+import { ARENA_RUBRIC, dimensionLabel, dimensions, type Job } from '../shared/domain';
 import { arenaDetailKey, arenaVoiceName } from './arenaDetails';
 import { unassessedDescriptor, voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors';
 
 export type ArenaComparisonView = 'scores' | 'descriptors';
 
-export function ArenaDimensionComparison({ cells, busy, onInspect, loadingDimensions, dimensionError, view = 'scores' }: {
-  cells: ArenaCell[]; busy: boolean; onInspect: (cell: ArenaCell) => void; loadingDimensions?: boolean; dimensionError?: string; view?: ArenaComparisonView;
+export function ArenaDimensionComparison({ cells, busy, onInspect, load, loadingDimensions, dimensionError, view = 'scores' }: {
+  cells: ArenaCell[]; busy: boolean; onInspect: (cell: ArenaCell) => void; load: (id: string) => Promise<Job>;
+  loadingDimensions?: boolean; dimensionError?: string; view?: ArenaComparisonView;
 }) {
   const sorting = useTableSort({ key: 'overall', direction: 'descending' });
   const descriptorSorting = useTableSort({ key: 'voice', direction: 'ascending' });
@@ -32,7 +33,7 @@ export function ArenaDimensionComparison({ cells, busy, onInspect, loadingDimens
     setExportError('');
     try {
       const { exportArenaComparison } = await import('./arenaExcel');
-      await exportArenaComparison(rows, view);
+      await exportArenaComparison(rows, view, load);
     } catch (error) {
       setExportError(error instanceof Error ? error.message : 'Unexpected workbook export error.');
     } finally {

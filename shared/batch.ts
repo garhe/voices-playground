@@ -8,7 +8,7 @@ export const batchDirectorySchema = z.union([
 ]);
 export type BatchRequest = z.infer<typeof batchDirectorySchema>;
 export const supportedAudio = /\.(wav|mp3|m4a|ogg|flac|aac|webm|opus)$/i;
-export type BatchFile = { id: string; path: string; voice: string; size: number };
+export type BatchFile = { id: string; path: string; voice: string; size: number; ssml?: string; scriptText?: string };
 export type BatchTest = {
   name: string; languages: string[]; genders: VoiceGender[]; files: BatchFile[]; errors: string[];
 };

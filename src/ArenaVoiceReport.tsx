@@ -1,9 +1,11 @@
+import { useRef } from 'react';
 import {
   activeDimensions, dimensionLabel, summarize, summarizeVoiceEvidence,
   type EvidenceNote, type Job,
 } from '../shared/domain';
 import { VoiceEvidenceTree } from './VoiceEvidenceTree';
 import { TtsDetailsExport } from './TtsDetailsExport';
+import { DisclosureControls, setDetailsOpen } from './DisclosureControls';
 import { unassessedDescriptor, voiceDescriptorFields, voiceDescriptorKeys } from '../shared/voiceDescriptors';
 import { voiceDescriptorRows } from '../shared/voiceDescriptorResults';
 
@@ -21,6 +23,8 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
   job: Job; voice: string; busy: boolean; onOpen: (id: string) => void;
 }) {
   const sorting = useTableSort({ key: 'panel', direction: 'ascending' });
+  const lowScoreEvidence = useRef<HTMLElement | null>(null);
+  const judgeLimitations = useRef<HTMLElement | null>(null);
   const clips = job.clips.filter(clip => clip.voice === voice && clip.role === 'speaker');
   const selected = { ...job, clips };
   const descriptors = voiceDescriptorRows(selected)[0]?.labels;
@@ -85,26 +89,34 @@ export function ArenaVoiceReport({ job, voice, busy, onOpen }: {
         </tr>)}</tbody>
       </table></div>
     </section>
-    <section className="card arena-card" aria-label="Low score evidence">
-      <h2>Why these scores · defects &amp; improvements</h2>
+    <section ref={lowScoreEvidence} className="card arena-card" aria-label="Low score evidence">
+      <div className="evidence-section-heading">
+        <h2>Why these scores · defects &amp; improvements</h2>
+        <DisclosureControls label="Why these scores" onChange={open => setDetailsOpen(lowScoreEvidence.current, open)} />
+      </div>
       <p className="hint">Dimensions are ordered from lowest to highest. Original judge reasons stay separate; comments may include excluded files. Check each source file and its scoring gaps below. No precise defect timestamp is inferred from a window-level comment.</p>
       {orderedDimensions.map((dimension, index) => <details id={`arena-dimension-${dimension}`} key={dimension} open={index === 0}>
         <summary><strong>{dimensionLabel(job.profile, dimension)}</strong> · {rating(summary.dimensions[dimension])}</summary>
         {evidence.judges.map((judge, judgeIndex) => {
           const item = judge.dimensions.find(item => item.dimension === dimension);
-          return <article key={judge.judgeId}>
-            <h3>{job.judges[judgeIndex].name} · {rating(item?.score ?? null)}</h3>
-            <h4>Original reasons</h4>
-            {item?.reasons.length ? <Notes notes={item.reasons} /> : <p>No scored reason saved for this dimension.</p>}
-            <h4>Defects &amp; improvements</h4>
-            {item?.improvements.length ? <Notes notes={item.improvements} /> : <p>No specific improvement case was saved. This does not establish a perfect performance.</p>}
-          </article>;
+          return <details className="arena-judge-evidence" key={judge.judgeId}>
+            <summary><strong>{job.judges[judgeIndex].name} · {rating(item?.score ?? null)}</strong></summary>
+            <article>
+              <h4>Original reasons</h4>
+              {item?.reasons.length ? <Notes notes={item.reasons} /> : <p>No scored reason saved for this dimension.</p>}
+              <h4>Defects &amp; improvements</h4>
+              {item?.improvements.length ? <Notes notes={item.improvements} /> : <p>No specific improvement case was saved. This does not establish a perfect performance.</p>}
+            </article>
+          </details>;
         })}
       </details>)}
     </section>
-    <VoiceEvidenceTree job={selected} />
-    <section className="card arena-card" aria-label="Judge limitations and gaps">
-      <h2>Scoring gaps &amp; limitations</h2>
+    <VoiceEvidenceTree job={selected} compact />
+    <section ref={judgeLimitations} className="card arena-card" aria-label="Judge limitations and gaps">
+      <div className="evidence-section-heading">
+        <h2>Scoring gaps &amp; limitations</h2>
+        <DisclosureControls label="Scoring gaps and limitations" onChange={open => setDetailsOpen(judgeLimitations.current, open)} />
+      </div>
       {evidence.judges.map((judge, index) => <details key={judge.judgeId} open={judge.gaps.length > 0}>
         <summary>{job.judges[index].name} · {judge.scoredFiles}/{summary.files} files scored by this judge</summary>
         <h3>Scoring gaps</h3>{judge.gaps.length ? <Notes notes={judge.gaps} /> : <p>No scoring gaps reported.</p>}

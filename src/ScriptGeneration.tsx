@@ -2,15 +2,16 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { DEFAULT_EXPRESSION_TAG_LISTS, expressionTagListsSchema, expressionTagRules } from '../shared/scriptExpressionTags';
 import {
   MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, MAX_SCRIPT_UTTERANCES, SCRIPT_EXPORT_BATCH_SIZE,
-  scriptBriefImprovementSchema, scriptBriefSuggestionSchema, scriptExportSchema,
+  scriptBriefFormat, scriptBriefImprovementSchema, scriptBriefSuggestionSchema, scriptExportSchema,
   scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptExportResult,
   type ScriptGenerationRequest, type ScriptGenerationStatus, type ScriptLocaleOption,
 } from '../shared/scriptGeneration';
 import { studioLocaleLabel } from '../shared/studioVoices';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
 import { resultLocale } from './scriptGenerationProgress';
-import { loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
+import { deleteBriefTemplate, loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, updateBriefTemplate, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
 import { ScriptTags } from './ScriptTags';
+import { RecordingScript } from './RecordingScript';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Unexpected script generation error.';
 const defaultStyleTags = DEFAULT_EXPRESSION_TAG_LISTS.styles.join(', ');
@@ -23,6 +24,7 @@ export const DEFAULT_SCRIPT_LOCALES = [
 ] as const;
 const CUSTOMER_SERVICE_SCENARIOS = `### Task
 Write realistic agent-only calls in the target language.
+Speakers: 1
 
 ### 4 Domains — 16 Utterances Total
 Write 4 agent utterances per call, in this order:
@@ -83,7 +85,10 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const [soundTags, setSoundTags] = useState(defaultSoundTags);
   const tagLists = expressionTagListsSchema.safeParse({ styles: parseTagNames(styleTags), sounds: parseTagNames(soundTags) });
   const [prompt, setPrompt] = useState(DEFAULT_SCRIPT_BRIEF);
-  const [workspace, setWorkspace] = useState<'generate' | 'tags'>('generate');
+  const briefFormat = scriptBriefFormat(prompt);
+  const effectiveSpeakers = briefFormat.speakers ?? speakers;
+  const effectiveUtteranceCount = briefFormat.utteranceCount ?? utteranceCount;
+  const [workspace, setWorkspace] = useState<'generate' | 'tags' | 'recording'>('generate');
   const [defaultBrief, setDefaultBrief] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<string>(BUILT_IN_BRIEF_TEMPLATES[0].name);
   const [customTemplates, setCustomTemplates] = useState<BriefTemplate[]>([]);
@@ -108,6 +113,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   }, []);
   const templates = [...BUILT_IN_BRIEF_TEMPLATES, ...customTemplates];
   const selectedBrief = selectedTemplate === '' ? defaultBrief : templates.find(template => template.name === selectedTemplate)?.prompt;
+  const selectedCustomTemplate = customTemplates.find(template => template.name === selectedTemplate);
   const briefEdited = selectedBrief !== prompt;
   const extractedStyle = extractScriptStyle(prompt);
   const style = styleOverride?.trim() || extractedStyle;
@@ -216,13 +222,25 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     clearImprovement();
   }
 
-  function saveAsDefault() {
+  function updateTemplate() {
     setTemplateStatus(''); setTemplateError('');
     try {
-      saveDefaultBrief(window.localStorage, prompt);
-      setDefaultBrief(prompt);
-      setSelectedTemplate('');
-      setTemplateStatus('Saved as your default brief in this browser.');
+      setCustomTemplates(updateBriefTemplate(window.localStorage, selectedTemplate, prompt));
+      setTemplateStatus(`Updated template "${selectedTemplate}" in this browser.`);
+    } catch (error) { setTemplateError(errorText(error)); }
+  }
+
+  function deleteTemplate() {
+    if (!selectedCustomTemplate) return;
+    const unsaved = briefEdited ? ' Unsaved changes to this brief will be discarded.' : '';
+    if (!window.confirm(`Delete template "${selectedCustomTemplate.name}" from this browser?${unsaved}`)) return;
+    setTemplateStatus(''); setTemplateError('');
+    try {
+      setCustomTemplates(deleteBriefTemplate(window.localStorage, selectedCustomTemplate.name));
+      setSelectedTemplate(BUILT_IN_BRIEF_TEMPLATES[0].name);
+      setPrompt(BUILT_IN_BRIEF_TEMPLATES[0].prompt);
+      setTemplateStatus(`Deleted template "${selectedCustomTemplate.name}" from this browser.`);
+      clearImprovement();
     } catch (error) { setTemplateError(errorText(error)); }
   }
 
@@ -242,7 +260,8 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   async function improveBrief() {
     if (!readyToImprove || controlsDisabled) return;
     clearImprovement();
-    const input = scriptBriefImprovementSchema.safeParse({ prompt, style, speakers, consent: true });
+    if (briefFormat.error) { setImprovementError(briefFormat.error); return; }
+    const input = scriptBriefImprovementSchema.safeParse({ prompt, style, speakers: effectiveSpeakers, consent: true });
     if (!input.success) { setImprovementError(input.error.issues[0].message); return; }
     setBusy('improve');
     try {
@@ -277,7 +296,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       return;
     }
     const input = scriptGenerationSchema.safeParse({
-      locales, style, speakers, utteranceCount: Number(utteranceCount),
+      locales, style, speakers: effectiveSpeakers, utteranceCount: Number(effectiveUtteranceCount),
       prompt, expressionTags, consent: true,
       ...(expressionTags && tagLists.success ? { expressionTagLists: tagLists.data } : {}),
     });
@@ -319,6 +338,8 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         onClick={() => setWorkspace('generate')}>Generate scripts</button>
       <button type="button" className={workspace === 'tags' ? 'primary' : 'secondary'} aria-pressed={workspace === 'tags'}
         onClick={() => setWorkspace('tags')}>Script tags</button>
+      <button type="button" className={workspace === 'recording' ? 'primary' : 'secondary'} aria-pressed={workspace === 'recording'}
+        onClick={() => setWorkspace('recording')}>Recording script</button>
     </div>
     <div className="script-tag-workspace" hidden={workspace !== 'tags'}>
       <ScriptTags request={request} tagLists={tagLists.success ? tagLists.data : undefined}
@@ -357,17 +378,23 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
               onChange={event => { setStyleOverride(event.target.value); clearImprovement(); }}
               onBlur={event => { if (!event.target.value.trim()) setStyleOverride(undefined); }}
               maxLength={MAX_SCRIPT_STYLE_LENGTH} placeholder="e.g. Warm documentary narration" /></label>
-            <label>Speakers<select value={speakers} onChange={event => { setSpeakers(event.target.value === '2' ? 2 : 1); clearImprovement(); }}>
-              <option value={1}>One speaker</option><option value={2}>Two speakers</option></select></label>
-            <label>Utterances per locale<input required type="number" min={speakers} max={MAX_SCRIPT_UTTERANCES} value={utteranceCount}
-              onChange={event => setUtteranceCount(event.target.value)} /></label>
+            <label>Speakers<select value={effectiveSpeakers} disabled={briefFormat.speakers !== undefined}
+              onChange={event => { setSpeakers(event.target.value === '2' ? 2 : 1); clearImprovement(); }}>
+              <option value={1}>One speaker</option><option value={2}>Two speakers</option></select>
+              {briefFormat.speakers !== undefined && <small>From content brief</small>}</label>
+            <label>Utterances per locale<input required type="number" min={effectiveSpeakers} max={MAX_SCRIPT_UTTERANCES}
+              value={effectiveUtteranceCount} readOnly={briefFormat.utteranceCount !== undefined}
+              onChange={event => setUtteranceCount(event.target.value)} />
+              {briefFormat.utteranceCount !== undefined && <small>From content brief</small>}</label>
             <label>Expression tags<select value={expressionTags ? 'on' : 'off'} onChange={event => setExpressionTags(event.target.value === 'on')}>
               <option value="on">On</option><option value="off">Off</option>
             </select></label>
           </div>
-          {briefEdited && <small>Unsaved brief edits. Save them as your default or as a named template to reuse them later.</small>}
+          {briefFormat.error ? <p className="error-text" role="alert">{briefFormat.error}</p> :
+            <small className="muted">Set exact counts in the brief (e.g. <code>Speakers: 2</code> and <code>Utterances: 24</code>). Otherwise the form settings apply.</small>}
+          {briefEdited && <small>Unsaved brief edits. {selectedCustomTemplate ? 'Update the selected template or save a new template to reuse them later.' : 'Save a new template to reuse them later.'}</small>}
           <label>Content brief<textarea required rows={4} maxLength={MAX_SCRIPT_BRIEF_LENGTH} value={prompt}
-            onChange={event => { setPrompt(event.target.value); clearImprovement(); }}
+            onChange={event => { setPrompt(event.target.value); setTemplateStatus(''); clearImprovement(); }}
             placeholder="Describe the scenario, tone and topics. For example: A customer calls to reschedule a delivery. Confirm the new date and explain the next steps." /></label>
           {expressionTags && <details className="script-preview">
             <summary>Expression tags applied: one style tag per sentence</summary>
@@ -391,7 +418,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
             <p role="status">Suggestion ready. Your original brief is unchanged.</p>
             <label>Suggested brief<textarea readOnly rows={5} value={suggestion} /></label>
             <div className="button-row">
-              <button type="button" className="secondary" onClick={() => { setPrompt(suggestion); clearImprovement(); }}>Use suggestion</button>
+              <button type="button" className="secondary" onClick={() => { setPrompt(suggestion); setTemplateStatus(''); clearImprovement(); }}>Use suggestion</button>
               <button type="button" className="text-button" onClick={clearImprovement}>Keep original</button>
             </div>
           </div>}
@@ -401,9 +428,12 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
                 onChange={event => setTemplateName(event.target.value)}
                 onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); if (!event.nativeEvent.isComposing) saveTemplate(); } }} /></label>
               <button className="secondary" type="button" disabled={!templateName.trim() || !prompt.trim()} onClick={saveTemplate}>Save as template</button>
-              <button className="secondary" type="button" disabled={!prompt.trim() || prompt === defaultBrief} onClick={saveAsDefault}>Save as default</button>
+              {selectedCustomTemplate && <>
+                <button className="secondary" type="button" disabled={!briefEdited || !prompt.trim()} onClick={updateTemplate}>Update template</button>
+                <button className="secondary danger" type="button" onClick={deleteTemplate}>Delete template</button>
+              </>}
             </div>
-            <small id={templateSaveHintId} className="muted">Saved in this browser. Your default loads on startup. The original template is unchanged.</small>
+            <small id={templateSaveHintId} className="muted">Templates are saved in this browser. Built-in templates cannot be changed or deleted.</small>
             {templateStatus && <p role="status">{templateStatus}</p>}
             {templateError && <p className="error-text" role="alert">{templateError}</p>}
           </div>
@@ -509,6 +539,11 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         {result.error && <span className="error-text"> {result.file}: {result.error}</span>}
       </li>)}</ul>}
     </form>
+    </div>
+    <div className="recording-script-workspace" hidden={workspace !== 'recording'}>
+      <RecordingScript request={request} active={active && workspace === 'recording'} connected={connected} speechConfigured={speechConfigured}
+        deployment={deployment} onConfigure={onConfigure}
+        azureBusy={previewIsGenerating || isRegenerating || busy === 'improve' || (!!textRequest && textRequest.kind !== 'recording-script')} />
     </div>
   </section>;
 }
