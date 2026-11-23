@@ -13,7 +13,8 @@ import {
   assignRecordingIds, buildRecordingRows, countWords, DEFAULT_RECORDING_ID_START, parseRecordingDomains, recordingCharacterCount,
   recordingGenerateSchema, recordingScriptText, recordingVariantKey, recordingVariants, type RecordingScript,
 } from '../shared/recordingScript.js';
-import { RecordingScript as RecordingScriptView } from '../src/RecordingScript.js';
+import { RecordingGenerationProgress, RecordingScript as RecordingScriptView } from '../src/RecordingScript.js';
+import { RecordingBatchScheduler } from '../src/recordingBatchScheduler.js';
 
 test('counts words with locale-aware segmentation', () => {
   assert.equal(countWords('Hi, I ordered a glass vase and it just arrived completely shattered into a million pieces.', 'en-US'), 16);
@@ -76,15 +77,26 @@ test('generates and saves recording scripts through the Recording script routes'
   t.after(() => rm(root, { force: true, recursive: true }));
   const output = path.join(root, 'scripts');
   await mkdir(output);
-  const speechFetch: typeof fetch = async () => Response.json(['en-US', 'ja-JP'].map((Locale, index) => ({
+  const parallelLocales = ['en-US', 'ja-JP', 'fr-FR', 'zh-HK', 'de-DE', 'es-ES', 'it-IT', 'pt-BR', 'ko-KR', 'th-TH',
+    'en-GB', 'en-AU', 'fr-CA', 'zh-CN', 'es-MX', 'pt-PT', 'da-DK', 'sv-SE', 'fi-FI', 'pl-PL'];
+  const speechFetch: typeof fetch = async () => Response.json([...parallelLocales, 'vi-VN'].map((Locale, index) => ({
     ShortName: `voice-${index}`, DisplayName: `Voice ${index}`, Gender: 'Female', Locale, SecondaryLocaleList: [],
   })));
   const specs: {
     locale: string; recordedRole: string; contentBrief: string; domains: string[];
     totalCharacters?: number; previousAttemptProblem?: string; agentGender?: string; customerGender?: string; previousScenarios?: string[];
-    batchNumber?: number;
+    batchNumber?: number; scenarioFocus?: string;
   }[] = [];
   let simulateTimeout = true;
+  const parallelGate = new AbortController();
+  const parallelWorkbooks = [
+    { locale: parallelLocales[0], agentGender: 'female' as const },
+    { locale: parallelLocales[0], agentGender: 'male' as const },
+    ...parallelLocales.slice(1, 19).map(locale => ({ locale, agentGender: 'female' as const })),
+  ];
+  const entered = new Map(parallelWorkbooks.map(target => [recordingVariantKey(target), new AbortController()]));
+  const waitForGate = (gate: AbortController) => gate.signal.aborted
+    ? Promise.resolve() : once(gate.signal, 'abort').then(() => undefined);
   const scriptFetch: typeof fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     const spec = JSON.parse(body.messages[1].content);
@@ -106,15 +118,26 @@ test('generates and saves recording scripts through the Recording script routes'
     if (spec.batchNumber) {
       assert.equal(spec.domains.length, 1);
       assert.ok(spec.totalCharacters > 0 && spec.totalCharacters <= 1800);
-      assert.equal(spec.agentGender, 'female');
-      assert.equal(spec.customerGender, 'male');
+      assert.ok(spec.agentGender === 'female' || spec.agentGender === 'male');
+      assert.equal(spec.customerGender, spec.agentGender === 'female' ? 'male' : 'female');
+      if (spec.contentBrief === 'Throttled batch test.') {
+        return Response.json({}, { status: 429, headers: { 'Retry-After': '9' } });
+      }
+      if (spec.contentBrief === 'Parallel batch test.' && spec.batchNumber === 1) {
+        const key = recordingVariantKey({ locale: spec.locale, agentGender: spec.agentGender });
+        const gate = entered.get(key);
+        assert.ok(gate, `Unexpected parallel batch for ${key}`);
+        gate.abort();
+        await waitForGate(parallelGate);
+      }
       if (spec.batchNumber === 2 && simulateTimeout) {
         simulateTimeout = false;
         throw new DOMException('Mock timeout', 'TimeoutError');
       }
       const rows = Array.from({ length: 24 }, (_, index) => {
         const conversation = Math.floor(index / 6) + 1;
-        const scenario = `${spec.domains[0]} — Batch ${spec.batchNumber} case ${conversation}`;
+        const variant = spec.contentBrief === 'Parallel batch test.' ? `${spec.agentGender} ` : '';
+        const scenario = `${spec.domains[0]} — ${variant}Batch ${spec.batchNumber} case ${conversation}`;
         const chars = Math.floor(spec.totalCharacters / 24) + Number(index < spec.totalCharacters % 24);
         return [
           { conversation, scenario, role: 'Customer', content: 'I need help.', tone: '' },
@@ -160,9 +183,9 @@ test('generates and saves recording scripts through the Recording script routes'
     domains: ['Telecom', 'Banking'], totalCharacters: 1, consent: true,
   };
   assert.equal((await post('generate', { ...request, consent: false })).status, 400);
-  const unknown = await post('generate', { ...request, locale: 'it-IT' });
+  const unknown = await post('generate', { ...request, locale: 'nl-NL' });
   assert.equal(unknown.status, 400);
-  assert.match((await unknown.json()).error, /it-IT is not in the current Azure Speech voice catalog/);
+  assert.match((await unknown.json()).error, /nl-NL is not in the current Azure Speech voice catalog/);
 
   const generated = await post('generate', request);
   assert.equal(generated.status, 200);
@@ -245,9 +268,15 @@ test('generates and saves recording scripts through the Recording script routes'
   assert.equal(firstBatch.batches, 1);
   assert.equal(firstBatch.done, false);
   assert.ok(firstBatch.characters > 0);
-  step = await post('batch', longRun);
-  assert.equal(step.status, 400);
+  step = await post('batch', { ...longRun, paired: true });
+  assert.equal(step.status, 504);
   assert.match((await step.json()).error, /timed out/);
+  const throttled = await post('batch', {
+    ...longRun, runId: '37c4a0e9-d782-46e9-92d4-6784a4bdec16',
+    input: { ...longRun.input, prompt: 'Throttled batch test.' },
+  });
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.headers.get('Retry-After'), '9');
   const restarted = await createApp(appOptions);
   restarted.app.use(restarted.errors);
   server.off('request', app);
@@ -271,7 +300,7 @@ test('generates and saves recording scripts through the Recording script routes'
   for (const domain of longRun.input.domains) {
     assert.equal(recordingCharacterCount(agentRows.filter(row => row.scenario.startsWith(`${domain} — `))), 35_000);
   }
-  assert.equal(specs.filter(spec => spec.batchNumber === 1).length, 1);
+  assert.equal(specs.filter(spec => spec.batchNumber === 1 && spec.contentBrief === longRun.input.prompt).length, 1);
   assert.equal(merged.rows.length, progress.batches * 48);
   assert.equal(new Set(merged.rows.filter(row => row.turn === 1).map(row => row.scenario)).size, progress.batches * 4);
   const calls = specs.length;
@@ -292,6 +321,119 @@ test('generates and saves recording scripts through the Recording script routes'
   assert.equal(longSheet.getCell(`A${longSheet.rowCount}`).value, `${4_010_000_000 + agentRows.length}`);
   assert.equal(longSheet.getColumn(5).values.slice(2).reduce<number>((sum, value, index) =>
     sum + (index % 2 === 1 ? Array.from(String(value)).length : 0), 0), 70_000);
+
+  const parallelRun = {
+    runId: '37c4a0e9-d782-46e9-92d4-6784a4bdec15',
+    input: { ...longRun.input, prompt: 'Parallel batch test.' },
+  };
+  const parallelBatch = (locale: string, agentGender = 'female') => post('batch', {
+    ...parallelRun, ...(locale === 'en-US' ? { paired: true } : {}),
+    input: { ...parallelRun.input, locale, agentGender },
+  });
+  const inFlight: Promise<Response>[] = [];
+  try {
+    for (const target of parallelWorkbooks) {
+      const { locale, agentGender } = target;
+      const gate = entered.get(recordingVariantKey(target))!;
+      const batch = parallelBatch(locale, agentGender);
+      inFlight.push(batch);
+      await Promise.race([waitForGate(gate), batch.then(response => assert.fail(`${locale} returned ${response.status} before entering Azure.`))]);
+      if (locale === 'en-US') assert.equal((await parallelBatch(locale, agentGender)).status, 409);
+    }
+    assert.equal((await parallelBatch('vi-VN')).status, 409);
+    assert.equal((await post('generate', request)).status, 409);
+  } finally { parallelGate.abort(); }
+  assert.deepEqual((await Promise.all(inFlight)).map(response => response.status), Array(20).fill(200));
+  const pairedSpecs = specs.filter(spec => spec.contentBrief === 'Parallel batch test.' && spec.locale === 'en-US');
+  assert.match(pairedSpecs.find(spec => spec.agentGender === 'female')?.scenarioFocus ?? '', /before or during/);
+  assert.match(pairedSpecs.find(spec => spec.agentGender === 'male')?.scenarioFocus ?? '', /after a transaction/);
+  for (const gender of ['female', 'male']) {
+    const nextPaired = await parallelBatch('en-US', gender);
+    assert.equal(nextPaired.status, 200);
+    assert.equal((await nextPaired.json()).batches, 2);
+  }
+  const nextMale = specs.at(-1)!;
+  assert.ok(nextMale.previousScenarios?.includes(`${nextMale.domains[0]} — female Batch 2 case 1`));
+});
+
+test('ramps recording batch concurrency to twenty without counting restored checkpoints', async t => {
+  const limits: number[] = [];
+  const scheduler = new RecordingBatchScheduler(20, limit => limits.push(limit));
+  t.after(() => scheduler.close());
+  for (let index = 0; index < 15; index++) await scheduler.request(async () => ({ done: true }));
+  assert.deepEqual(limits, [4]);
+  for (let index = 0; index < 184; index++) await scheduler.request(async () => ({ done: false }));
+  assert.deepEqual(limits, Array.from({ length: 17 }, (_, index) => index + 4));
+  const gate = new AbortController();
+  const released = once(gate.signal, 'abort');
+  let started = 0;
+  const work = Array.from({ length: 21 }, () => scheduler.request(async () => {
+    started++;
+    await released;
+    return { done: false };
+  }));
+  await Promise.resolve();
+  try { assert.equal(started, 20); }
+  finally { gate.abort(); }
+  await Promise.all(work);
+  assert.equal(started, 21);
+});
+
+test('returns to the last stable limit after a failed probe and waits before increasing again', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  let limit = 0;
+  const scheduler = new RecordingBatchScheduler(20, next => { limit = next; }, 0);
+  t.after(() => scheduler.close());
+  const success = () => scheduler.request(async () => ({ done: false }));
+  const throttleOnce = async () => {
+    let attempts = 0;
+    await scheduler.request(async () => {
+      if (attempts++ === 0) throw Object.assign(new Error('Throttled'), { status: 429 });
+      return { done: false };
+    });
+  };
+  for (let index = 0; index < 9; index++) await success();
+  assert.equal(limit, 6);
+  await throttleOnce();
+  assert.equal(limit, 5);
+  now += 59_999;
+  for (let index = 0; index < 5; index++) await success();
+  assert.equal(limit, 5);
+  now++;
+  await success();
+  assert.equal(limit, 6);
+  await throttleOnce();
+  assert.equal(limit, 5);
+  await throttleOnce();
+  assert.equal(limit, 2);
+});
+
+test('backs off on Azure throttling and timeouts, retries, and leaves other errors alone', async t => {
+  const changes: Array<{ limit: number; until: number }> = [];
+  const scheduler = new RecordingBatchScheduler(10, (limit, until) => changes.push({ limit, until }), 1);
+  t.after(() => scheduler.close());
+  let attempts = 0;
+  let cooldown = 0;
+  const result = await scheduler.request(async () => {
+    attempts++;
+    if (attempts === 1) {
+      cooldown = Date.now() + 10;
+      throw Object.assign(new Error('Throttled'), { status: 429, retryAfterMs: 10 });
+    }
+    assert.ok(Date.now() >= cooldown);
+    if (attempts === 2) throw Object.assign(new Error('Timeout'), { status: 504 });
+    return { done: false };
+  });
+  assert.deepEqual(result, { done: false });
+  assert.equal(attempts, 3);
+  assert.deepEqual(changes.filter(change => change.until > 0).map(change => change.limit), [2, 1]);
+  let failures = 0;
+  await assert.rejects(scheduler.request(async () => {
+    failures++;
+    throw new Error('Invalid credentials');
+  }), /Invalid credentials/);
+  assert.equal(failures, 1);
 });
 
 function renderRecordingScript() {
@@ -300,6 +442,37 @@ function renderRecordingScript() {
     deployment: 'text-default', azureBusy: false, onConfigure: () => undefined,
   }));
 }
+
+test('shows live Recording script progress from finished scripts and saved batches', () => {
+  const render = (props: Parameters<typeof RecordingGenerationProgress>[0]) =>
+    renderToStaticMarkup(createElement(RecordingGenerationProgress, props));
+  assert.match(render({ completed: 0, total: 24 }), /aria-valuenow="0"/);
+  const partial = render({ completed: 0, total: 24, batches: {
+    'en-us:female': { label: 'English', characters: 35_000, target: 70_000, batches: 20 },
+    'ja-jp:female': { label: 'Japanese', characters: 35_000, target: 70_000, batches: 18 },
+  } });
+  assert.match(partial, /<strong>4\.1%<\/strong>/);
+  assert.match(partial, /aria-valuenow="4\.1"/);
+  assert.match(partial, /20 batches saved/);
+  assert.match(partial, /18 batches saved/);
+  assert.match(render({ completed: 1, total: 2, batches: {
+    'en-us:female': { label: 'English', characters: 70_001, target: 70_000, batches: 40 },
+  } }), /aria-valuenow="99\.9"/);
+  assert.match(render({ completed: 1, total: 2 }), /aria-valuenow="50"/);
+  assert.match(render({ completed: 2, total: 2 }), /aria-valuenow="100"/);
+});
+
+test('lists in-progress workbooks by saved Agent characters, highest first', () => {
+  const html = renderToStaticMarkup(createElement(RecordingGenerationProgress, {
+    completed: 4, total: 24, batches: {
+      'fr-fr:male': { label: 'French (France) Male', characters: 61_243, target: 80_000, batches: 34 },
+      'en-us:male': { label: 'English (US) Male', characters: 20_427, target: 80_000, batches: 11 },
+      'ko-kr:female': { label: 'Korean (Korea) Female', characters: 69_348, target: 80_000, batches: 39 },
+    },
+  }));
+  assert.deepEqual([...html.matchAll(/<p class="muted" role="status">([^:]+):/g)].map(([, label]) => label),
+    ['Korean (Korea) Female', 'French (France) Male', 'English (US) Male']);
+});
 
 test('renders the Recording script workspace with the default brief and column guide', () => {
   const html = renderRecordingScript();
@@ -310,6 +483,7 @@ test('renders the Recording script workspace with the default brief and column g
   assert.ok(controlsEnd > controlsStart);
   assert.doesNotMatch(html.slice(controlsStart, controlsEnd), />Domains<input/);
   assert.match(html.slice(controlsStart), /<\/div><label>Domains<input[^>]*>[^]*?<\/label><label>Content brief<textarea/);
+  assert.match(html, /Domains<input[^>]*value="Online Shopping, Food Delivery, Travel, Hospitality, Telecom, Banking, Financial Services, Insurance, Restaurant, Tour, Medical, Spa"/);
   assert.match(html, /Agent characters per locale/);
   assert.match(html, /Customer replies do not count/);
   assert.match(html, /Start every service Agent reply with a short, audible acknowledgment/);

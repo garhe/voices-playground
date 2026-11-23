@@ -492,6 +492,8 @@ main { max-width: none; padding-bottom: 8px; }
 .recording-gender-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 36px; }
 .recording-gender-options input { margin: 0; }
 .recording-file-example { display: block; width: fit-content; overflow-wrap: anywhere; }
+.recording-progress-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
+.recording-generation-progress .progress-track { height: 6px; margin: 6px 0; }
 .script-brief-controls > .script-brief-style { gap: 4px; }
 .script-brief-controls select { width: 100%; text-overflow: ellipsis; }
 .script-template-save-group { display: grid; gap: 4px; min-width: 0; }

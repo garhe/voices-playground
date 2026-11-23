@@ -54,7 +54,11 @@ async function api<T>(url: string, body?: unknown, method = 'POST', signal?: Abo
     let detail = text;
     try { detail = (JSON.parse(text) as { error?: string }).error || text; }
     catch { detail = `HTTP ${response.status}: ${text.slice(0, 250)}`; }
-    throw new Error(detail);
+    const retryAfter = response.headers.get('Retry-After');
+    throw Object.assign(new Error(detail), {
+      status: response.status,
+      retryAfterMs: retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : 0,
+    });
   }
   return response.json() as Promise<T>;
 }

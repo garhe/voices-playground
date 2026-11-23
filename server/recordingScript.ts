@@ -7,7 +7,7 @@ import {
   buildRecordingRows, DEFAULT_RECORDING_ROLE, isRecordedRole, MAX_RECORDING_FILE_ROWS, recordingBatchRequestSchema, recordingCharacterCount, recordingDraftSchema, recordingExportSchema, recordingGenerateSchema,
   RECORDING_AGENT_ACKNOWLEDGMENTS, RECORDING_BATCH_CHARACTERS, RECORDING_DATE_TIME_DETAILS, RECORDING_LOCAL_SPEECH,
   recordingScenarioKey, recordingScriptFileName, recordingScriptTable, recordingVariantKey,
-  type RecordingBatchResult, type RecordingExportResult, type RecordingGenerateRequest, type RecordingRow, type RecordingScript,
+  type RecordingBatchResult, type RecordingExportResult, type RecordingGenerateRequest, type RecordingRow, type RecordingScript, type RecordingVariant,
 } from '../shared/recordingScript.js';
 import type { ScriptLocaleOption } from '../shared/scriptGeneration.js';
 import { realDirectory } from './localDirectory.js';
@@ -15,7 +15,7 @@ import type { Store } from './store.js';
 
 export type RecordingScriptDependencies = {
   locales: () => Promise<ScriptLocaleOption[]>;
-  withTextRequest: (res: ExpressResponse, run: (signal: AbortSignal) => Promise<void>) => Promise<void>;
+  withTextRequest: (res: ExpressResponse, run: (signal: AbortSignal) => Promise<void>, batchWorkbook?: string) => Promise<void>;
   complete: (signal: AbortSignal, system: string, input: object, maxTokens: number) => Promise<unknown>;
   store: Pick<Store, 'read' | 'save'>;
 };
@@ -109,7 +109,16 @@ function batchIssue(rows: RecordingRow[], domain: string): string | undefined {
 }
 
 export function registerRecordingScript(app: Express, { locales, withTextRequest, complete, store }: RecordingScriptDependencies) {
-  async function generateScript(input: RecordingGenerateRequest, signal: AbortSignal, batch?: { number: number; scenarioExamples: string[] }): Promise<RecordingScript> {
+  async function readCheckpoint(file: string) {
+    try { return await store.read<RecordingBatchCheckpoint>(file); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  async function generateScript(input: RecordingGenerateRequest, signal: AbortSignal, batch?: {
+    number: number; scenarioExamples: string[]; scenarioFocus?: string;
+  }): Promise<RecordingScript> {
       const catalog = await locales();
       const locale = catalog.find(option => option.value.toLowerCase() === input.locale.toLowerCase());
       if (!locale) throw new Error(`${input.locale} is not in the current Azure Speech voice catalog. Refresh locales and update the selection.`);
@@ -123,11 +132,14 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
         signal.throwIfAborted();
         const system = recordingInstructions(input.recordedRole) + (batch
           ? ' This is one batch of a longer script. The structured domains and totalCharacters apply only to this batch and override any whole-script scope in the content brief. Generate complete, distinct calls only, alternating Customer and Agent turns and starting with the Customer. Keep rows for each call together, give each call a unique scenario label, and finish every call with the Agent before starting another. Aim for totalCharacters, but prioritize natural complete calls over padding. The first batch may include at most one greeting; do not include greetings in later batches.' : '');
-        const value = await complete(signal, system, {
+        const pairedInstructions = batch?.scenarioFocus
+          ? ' A companion workbook is generating different cases in parallel. Use scenarioFocus to choose distinct incidents, causes, and fixes within the brief and domain, not merely different names or genders. Scenario focus is only a way to divide cases, not a difference in how the Agent speaks or behaves.' : '';
+        const value = await complete(signal, system + pairedInstructions, {
           locale: locale.value, language: locale.label, recordedRole: input.recordedRole, domains: input.domains,
           totalCharacters: input.totalCharacters, contentBrief: input.prompt,
           previousScenarios: batch ? batch.scenarioExamples : input.previousScenarios,
           batchNumber: batch?.number,
+          scenarioFocus: batch?.scenarioFocus,
           ...genderPair,
           ...(feedback ? { previousAttemptProblem: feedback } : {}),
         }, batch ? 8192 : 16_384);
@@ -157,25 +169,30 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
   });
 
   app.post('/api/recording-script/batch', async (req, res) => {
-    const { runId, input } = recordingBatchRequestSchema.parse(req.body);
+    const { runId, input, paired } = recordingBatchRequestSchema.parse(req.body);
     const { previousScenarios, ...settings } = input;
-    const variant = createHash('sha256').update(recordingVariantKey(input)).digest('hex');
+    const checkpointFile = (target: RecordingVariant) => {
+      const variant = createHash('sha256').update(recordingVariantKey(target)).digest('hex');
+      return `recording-batch-${runId.toLowerCase()}-${variant}.json`;
+    };
     const fingerprint = createHash('sha256').update(JSON.stringify(settings)).digest('hex');
-    const file = `recording-batch-${runId.toLowerCase()}-${variant}.json`;
+    const file = checkpointFile(input);
     await withTextRequest(res, async signal => {
-      let state: RecordingBatchCheckpoint;
-      try { state = await store.read<RecordingBatchCheckpoint>(file); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        state = { fingerprint, batches: 0, script: { locale: input.locale, agentGender: input.agentGender, rows: [] } };
-      }
+      let state = await readCheckpoint(file) ??
+        { fingerprint, batches: 0, script: { locale: input.locale, agentGender: input.agentGender, rows: [] } };
       if (state.fingerprint !== fingerprint) throw new Error('The saved batch run uses different settings. Start a new run to change them.');
       const next = nextBatchDomain(state.script.rows, input.domains, input.totalCharacters);
       if (next) {
         const prefix = recordingScenarioKey(`${next.domain} —`);
         const related = (scenario: string) => recordingScenarioKey(scenario).startsWith(`${prefix} `);
         const ownScenarios = [...new Set(state.script.rows.map(row => row.scenario))];
-        const siblingScenarios = previousScenarios ?? [];
+        const sibling = paired && input.agentGender ? await readCheckpoint(checkpointFile({
+          locale: input.locale, agentGender: input.agentGender === 'female' ? 'male' : 'female',
+        })) : undefined;
+        const siblingScenarios = [...new Set([...(previousScenarios ?? []), ...(sibling?.script.rows.map(row => row.scenario) ?? [])])];
+        const scenarioFocus = paired && input.agentGender ? (input.agentGender === 'female'
+          ? 'Focus on setting up, accessing, changing, or using the service, including issues that arise before or during a transaction.'
+          : 'Focus on outcomes after a transaction, including delivery or fulfillment issues, disputes, corrections, or follow-up.') : undefined;
         const prior = new Set([...siblingScenarios, ...ownScenarios]);
         const scenarioExamples = [
           ...siblingScenarios.filter(related).slice(-15),
@@ -184,7 +201,7 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
         const batch = await generateScript({
           ...input, domains: [next.domain], previousScenarios: [...prior],
           totalCharacters: Math.ceil(next.remaining / Math.ceil(next.remaining / RECORDING_BATCH_CHARACTERS)),
-        }, signal, { number: state.batches + 1, scenarioExamples });
+        }, signal, { number: state.batches + 1, scenarioExamples, scenarioFocus });
         if (state.script.rows.length + batch.rows.length > MAX_RECORDING_FILE_ROWS)
           throw new Error(`The batch run reached the ${MAX_RECORDING_FILE_ROWS}-row limit before meeting its target.`);
         state = { fingerprint, batches: state.batches + 1, script: { ...batch, rows: [...state.script.rows, ...batch.rows] } };
@@ -195,7 +212,7 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
       const result: RecordingBatchResult = nextBatchDomain(state.script.rows, input.domains, input.totalCharacters)
         ? { ...progress, done: false } : { ...progress, done: true, script: state.script };
       res.json(result);
-    });
+    }, file);
   });
 
   app.post('/api/recording-script/save', async (req, res) => {

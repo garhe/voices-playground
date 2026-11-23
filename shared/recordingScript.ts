@@ -6,6 +6,8 @@ export const MAX_RECORDING_BRIEF_LENGTH = 8000;
 export const MAX_RECORDING_ROWS = 200;
 export const MAX_RECORDING_FILE_ROWS = 8000;
 export const RECORDING_BATCH_CHARACTERS = 1800;
+export const RECORDING_BATCH_START_CONCURRENCY = 4;
+export const RECORDING_BATCH_CONCURRENCY = 20;
 export const MAX_RECORDING_DOMAINS = 20;
 export const MAX_RECORDING_DOMAIN_LENGTH = 80;
 export const MAX_RECORDING_TARGET_CHARACTERS = 100_000;
@@ -92,6 +94,7 @@ export type RecordingGenerateRequest = z.infer<typeof recordingGenerateSchema>;
 
 export const recordingBatchRequestSchema = z.object({
   runId: z.string().uuid(),
+  paired: z.literal(true).optional(),
   input: recordingGenerateSchema.extend({
     totalCharacters: z.number().int().min(1).max(MAX_RECORDING_TARGET_CHARACTERS),
   }),

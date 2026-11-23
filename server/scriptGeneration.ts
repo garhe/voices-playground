@@ -19,6 +19,7 @@ import { ScriptGenerationRuns } from './scriptGenerationRun.js';
 import { scriptTagInspectionSchema, scriptTagRequestSchema } from '../shared/scriptTags.js';
 import { inspectScriptTags, processScriptTags } from './scriptTags.js';
 import { registerRecordingScript } from './recordingScript.js';
+import { RECORDING_BATCH_CONCURRENCY } from '../shared/recordingScript.js';
 
 const settingsFile = 'script-generation-settings.json';
 const storedSettingsSchema = z.object({
@@ -49,7 +50,7 @@ const foundryRejectionSchema = z.object({
 });
 
 class RetryableScriptError extends Error {
-  constructor(message: string, readonly retryAfterMs = 0) { super(message); }
+  constructor(message: string, readonly retryAfterMs = 0, readonly batchBackoffStatus?: 429 | 504) { super(message); }
 }
 
 function providerRetryDelay(headers: Headers): number {
@@ -110,11 +111,13 @@ async function requestJsonCompletion(
 ): Promise<unknown> {
   const responses = api === 'responses';
   const apiLabel = responses ? 'Foundry Responses' : 'Azure OpenAI Chat Completions';
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+  const timeoutError = () => new RetryableScriptError('Azure OpenAI timed out. Try again with a shorter request.', 0, 504);
   const response = await fetchText(responses ? new URL(endpoint) : new URL('/openai/v1/chat/completions', endpoint), {
     method: 'POST',
     headers: { 'api-key': key, 'Content-Type': 'application/json' },
     redirect: 'error',
-    signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]),
+    signal: requestSignal,
     body: JSON.stringify(responses ? {
       model: deployment,
       instructions: system,
@@ -132,19 +135,23 @@ async function requestJsonCompletion(
       ],
     }),
   }).catch((error: unknown) => {
-    if (error instanceof Error && error.name === 'TimeoutError') throw new RetryableScriptError('Azure OpenAI timed out. Try again with a shorter request.');
+    if (error instanceof Error && error.name === 'TimeoutError') throw timeoutError();
     throw new RetryableScriptError('Could not reach Azure OpenAI. Check the existing connection and try again.');
   });
   if (response.status === 401 || response.status === 403) throw new Error('Azure OpenAI did not authorize this request. Check the existing connection and deployment access.');
   if (response.status === 404) throw new Error(`${apiLabel} returned 404. Check the script deployment name and endpoint in Azure Settings.`);
-  if (response.status === 429) throw new RetryableScriptError('Azure OpenAI rate limit reached. Wait and try again.', providerRetryDelay(response.headers));
+  if (response.status === 429) throw new RetryableScriptError('Azure OpenAI rate limit reached. Wait and try again.', providerRetryDelay(response.headers), 429);
   if (response.status === 400) throw new Error(responses ? await foundryRejection(response)
     : `${apiLabel} rejected the request. Check that the deployment supports JSON mode and review the prompt.`);
   if (response.status === 408 || response.status >= 500) {
-    throw new RetryableScriptError(`Azure OpenAI returned HTTP ${response.status}.`, providerRetryDelay(response.headers));
+    throw new RetryableScriptError(`Azure OpenAI returned HTTP ${response.status}.`, providerRetryDelay(response.headers),
+      response.status === 408 || response.status === 504 ? 504 : undefined);
   }
   if (!response.ok) throw new Error(`Azure OpenAI returned HTTP ${response.status}.`);
-  const text = responseText(await response.json().catch(() => null), api);
+  const text = responseText(await response.json().catch((error: unknown) => {
+    if ([error, requestSignal.reason].some(reason => reason instanceof Error && reason.name === 'TimeoutError')) throw timeoutError();
+    return null;
+  }), api);
   try { return JSON.parse(text); }
   catch { throw new RetryableScriptError('Azure OpenAI did not return valid JSON. Try again.'); }
 }
@@ -385,21 +392,30 @@ export function registerScriptGeneration(app: Express, {
   });
   app.get('/api/script-generation/locales', async (req, res) => res.json(await locales(req.query.refresh === '1')));
 
-  let textRequest: { id: string; kind: NonNullable<ScriptGenerationStatus['textRequest']>['kind']; controller: AbortController } | undefined;
+  const textRequests = new Map<string, {
+    id: string; kind: NonNullable<ScriptGenerationStatus['textRequest']>['kind']; controller: AbortController; batchWorkbook?: string;
+  }>();
   async function withTextRequest(kind: NonNullable<ScriptGenerationStatus['textRequest']>['kind'], res: ExpressResponse,
-    run: (signal: AbortSignal) => Promise<void>) {
-    if (textRequest || runs.active) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
+    run: (signal: AbortSignal) => Promise<void>, batchWorkbook?: string) {
+    const canShare = batchWorkbook && textRequests.size < RECORDING_BATCH_CONCURRENCY
+      && [...textRequests.values()].every(request => request.batchWorkbook && request.batchWorkbook !== batchWorkbook);
+    if (runs.active || (textRequests.size && !canShare)) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
     const controller = new AbortController();
-    textRequest = { id: randomUUID(), kind, controller };
+    const id = randomUUID();
+    textRequests.set(id, { id, kind, controller, batchWorkbook });
     const onClose = () => controller.abort();
     res.once('close', onClose);
     try {
       await run(controller.signal);
     } catch (error) {
-      if (!controller.signal.aborted) throw error;
+      if (!controller.signal.aborted) {
+        if (!(batchWorkbook && error instanceof RetryableScriptError && error.batchBackoffStatus)) throw error;
+        if (error.retryAfterMs) res.set('Retry-After', String(Math.ceil(error.retryAfterMs / 1000)));
+        res.status(error.batchBackoffStatus).json({ error: error.message });
+      }
     } finally {
       res.off('close', onClose);
-      textRequest = undefined;
+      textRequests.delete(id);
       if (controller.signal.aborted && !res.destroyed && !res.writableEnded) {
         if (res.headersSent) res.destroy();
         else res.status(409).json({ error: 'Azure text request cancelled.' });
@@ -426,10 +442,13 @@ export function registerScriptGeneration(app: Express, {
   }
   const runs = new ScriptGenerationRuns(prepare, error => connection.redact(error),
     error => error instanceof RetryableScriptError ? error.retryAfterMs : undefined);
-  const status = (): ScriptGenerationStatus => ({
-    run: runs.current, textBusy: !!textRequest,
-    ...(textRequest ? { textRequest: { id: textRequest.id, kind: textRequest.kind, cancelling: textRequest.controller.signal.aborted } } : {}),
-  });
+  const status = (): ScriptGenerationStatus => {
+    const textRequest = textRequests.values().next().value;
+    return {
+      run: runs.current, textBusy: !!textRequest,
+      ...(textRequest ? { textRequest: { id: textRequest.id, kind: textRequest.kind, cancelling: textRequest.controller.signal.aborted } } : {}),
+    };
+  };
   const runRoute = '/api/script-generation/run';
   app.post('/api/script-generation/tags/inspect', async (req, res) => {
     const input = scriptTagInspectionSchema.parse(req.body);
@@ -480,13 +499,14 @@ export function registerScriptGeneration(app: Express, {
   app.get(runRoute, (_req, res) => res.json(status()));
   app.post(`${runRoute}/cancel-text`, (req, res) => {
     const { id } = z.object({ id: z.string().uuid() }).strict().parse(req.body);
-    if (!textRequest || textRequest.id !== id) { res.status(409).json({ error: 'This Azure text request is no longer current.' }); return; }
+    const textRequest = textRequests.get(id);
+    if (!textRequest) { res.status(409).json({ error: 'This Azure text request is no longer current.' }); return; }
     textRequest.controller.abort();
     res.json(status());
   });
   app.post(runRoute, (req, res) => {
     const input = scriptGenerationSchema.parse(req.body);
-    if (runs.active || textRequest) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
+    if (runs.active || textRequests.size) { res.status(409).json({ error: 'An Azure text request is already running.' }); return; }
     runs.start(input);
     res.status(202).json(status());
   });
@@ -497,10 +517,10 @@ export function registerScriptGeneration(app: Express, {
     if (action.action === 'pause' && run.state === 'running') runs.pause(run);
     else if (action.action === 'stop' && (run.state === 'running' || run.state === 'pausing')) runs.stop(run, false);
     else if (action.action === 'cancel' && (run.state === 'running' || run.state === 'pausing' || run.state === 'stopping' || run.state === 'paused')) runs.stop(run, true);
-    else if (action.action === 'resume' && !runs.active && !textRequest && (run.state === 'paused' || run.state === 'failed')) runs.resume(run);
-    else if (action.action === 'restart' && !runs.active && !textRequest) runs.start(run.input);
+    else if (action.action === 'resume' && !runs.active && !textRequests.size && (run.state === 'paused' || run.state === 'failed')) runs.resume(run);
+    else if (action.action === 'restart' && !runs.active && !textRequests.size) runs.start(run.input);
     else if (action.action === 'stop-regeneration' && run.regeneration?.state === 'running') runs.stopRegeneration();
-    else if (action.action === 'regenerate' && !textRequest && runs.canRegenerate(run, action.locale)) runs.regenerate(run, action.locale);
+    else if (action.action === 'regenerate' && !textRequests.size && runs.canRegenerate(run, action.locale)) runs.regenerate(run, action.locale);
     else { res.status(409).json({ error: 'That action is not available in the current generation state.' }); return; }
     res.json(status());
   });
@@ -592,7 +612,7 @@ export function registerScriptGeneration(app: Express, {
   registerRecordingScript(app, {
     store,
     locales: () => locales(),
-    withTextRequest: (res, run) => withTextRequest('recording-script', res, run),
+    withTextRequest: (res, run, batchWorkbook) => withTextRequest('recording-script', res, run, batchWorkbook),
     complete: async (signal, system, input, maxTokens) =>
       requestJsonCompletion(fetchText, await textConnection(), signal, system, input, maxTokens),
   });
