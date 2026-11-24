@@ -123,6 +123,15 @@ test('generates and saves recording scripts through the Recording script routes'
       if (spec.contentBrief === 'Throttled batch test.') {
         return Response.json({}, { status: 429, headers: { 'Retry-After': '9' } });
       }
+      if (spec.contentBrief === 'Azure server error test.') {
+        return Response.json({}, { status: 500, headers: { 'Retry-After': '12' } });
+      }
+      if (spec.contentBrief === 'Invalid batch draft test.') {
+        return Response.json({ choices: [{ finish_reason: 'stop', message: { content: '{}' } }] });
+      }
+      if (spec.contentBrief === 'Filtered batch test.') {
+        return Response.json({ choices: [{ finish_reason: 'content_filter', message: { content: null } }] });
+      }
       if (spec.contentBrief === 'Parallel batch test.' && spec.batchNumber === 1) {
         const key = recordingVariantKey({ locale: spec.locale, agentGender: spec.agentGender });
         const gate = entered.get(key);
@@ -277,6 +286,18 @@ test('generates and saves recording scripts through the Recording script routes'
   });
   assert.equal(throttled.status, 429);
   assert.equal(throttled.headers.get('Retry-After'), '9');
+  for (const [prompt, status, message] of [
+    ['Azure server error test.', 502, /Azure OpenAI returned HTTP 500/],
+    ['Invalid batch draft test.', 422, /did not match the required rows format/],
+    ['Filtered batch test.', 400, /declined this request/],
+  ] as const) {
+    const response = await post('batch', {
+      ...longRun, runId: '37c4a0e9-d782-46e9-92d4-6784a4bdec17', input: { ...longRun.input, prompt },
+    });
+    assert.equal(response.status, status);
+    assert.match((await response.json()).error, message);
+    if (status === 502) assert.equal(response.headers.get('Retry-After'), '12');
+  }
   const restarted = await createApp(appOptions);
   restarted.app.use(restarted.errors);
   server.off('request', app);
@@ -434,6 +455,41 @@ test('backs off on Azure throttling and timeouts, retries, and leaves other erro
     throw new Error('Invalid credentials');
   }), /Invalid credentials/);
   assert.equal(failures, 1);
+});
+
+test('retries recoverable batches beyond three attempts without blocking other queued work', async t => {
+  const scheduler = new RecordingBatchScheduler(1, () => {}, 1);
+  t.after(() => scheduler.close());
+  const attempts = [502, 422, 503, 502, 429, 504];
+  const order: string[] = [];
+  const retries: number[] = [];
+  let other: Promise<{ done: boolean }> | undefined;
+  const result = await scheduler.request(async () => {
+    const status = attempts.shift();
+    order.push(status ? String(status) : 'success');
+    if (status) throw Object.assign(new Error('Retryable batch error'), { status });
+    return { done: true };
+  }, retry => {
+    retries.push(retry.attempt);
+    if (retry.attempt === 1) other = scheduler.request(async () => {
+      order.push('other workbook');
+      return { done: true };
+    });
+  });
+  await other;
+  assert.deepEqual(result, { done: true });
+  assert.deepEqual(retries, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(order, ['502', 'other workbook', '422', '503', '502', '429', '504', 'success']);
+});
+
+test('stopping cancels a batch waiting for a retry', async () => {
+  const scheduler = new RecordingBatchScheduler(1, () => {}, 60_000);
+  let calls = 0;
+  await assert.rejects(scheduler.request(async () => {
+    calls++;
+    throw Object.assign(new Error('Temporary error'), { status: 502 });
+  }, () => queueMicrotask(() => scheduler.close())), /scheduling stopped/);
+  assert.equal(calls, 1);
 });
 
 function renderRecordingScript() {

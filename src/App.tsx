@@ -48,6 +48,9 @@ const score = (n: number | null | undefined) => n == null ? 'Not assessed' : n.t
 async function api<T>(url: string, body?: unknown, method = 'POST', signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, body === undefined ? { signal, method: method === 'POST' ? 'GET' : method } : {
     method, signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).catch((error: unknown) => {
+    if (url !== '/api/recording-script/batch' || signal?.aborted || !(error instanceof TypeError)) throw error;
+    throw Object.assign(new Error('Could not reach the local Recording script server.', { cause: error }), { status: 503 });
   });
   if (!response.ok) {
     const text = await response.text();

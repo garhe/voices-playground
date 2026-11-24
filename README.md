@@ -1,6 +1,38 @@
 # Voices Playground
 
-A local React + Node.js application for audio-only human auditions and TTS evaluation. Configure one or more Azure OpenAI Realtime deployments as independent listening judges, with no fixed panel-size limit. Each additional judge increases Azure usage and concurrent requests; deployment quotas still apply. Voice Arena gives judges the matched script line as a reference and can also send audio to Azure Speech for transient transcription and speaker-label review flags. Speech transcripts are not saved.
+Voices Playground is a local app for creating multilingual scripts, synthesizing audition clips, evaluating text-to-speech (TTS) voices, and organizing WAV collections. You can use each workspace on its own or generate a script, synthesize it in Studio, and compare the resulting voices in Arena.
+
+## What you can do
+
+| Workspace | What it does | Try it first |
+| --- | --- | --- |
+| [Voice Arena](#voice-arena) | Compares single-speaker TTS voices by language, accent, and script domain. Azure OpenAI Realtime judges listen to the audio and use matched script lines as references. | Open **New test**, add a script named `<locale>_<domain>.txt` and voice/model folders containing matching audio, then select **Preview script matching** before starting. Compare results in **Scorecard** and investigate individual clips in **Detailed reports**. |
+| [Azure Voices Studio](#azure-voices-studio-draft) | Synthesizes WAV audition clips from text using Azure Speech, with a searchable catalog of available voices. | Paste a few lines or import a `.txt` script, select voices, choose an existing output folder, and preview the clip/voice pairs before clicking **Start**. |
+| [Script Generation](#script-generation) | Generates multilingual scripts from a brief and exports Studio-ready `.txt` files. [Recording script](#recording-script) exports a separate `.xlsx` workbook for each locale and selected Agent gender. | Select a template and one locale, then click **Generate preview**. Use **Recording script** instead if you need dialogue rows, role, tone, and word counts for recording talent. |
+| [Folder Sorting](#folder-sorting-workspace) | Organizes local WAV collections into clean voice folders without sending files to Azure. | Paste one absolute collection folder path per line. For your first run, choose **Keep originals**, click **Preview sorting**, then create sorted copies. **Replace originals** permanently removes original contents, including non-WAV files. |
+
+## Quick setup
+
+1. On Windows, install **Git** and **Node.js 22.16 or later** (including npm). Open PowerShell and run:
+
+   ```powershell
+   git clone --branch publish/voices-playground-update https://github.com/garhe/voices-selection.git
+   Set-Location voices-selection
+   npm ci
+   npm run dev
+   ```
+
+2. With the terminal still running, open [http://127.0.0.1:4310](http://127.0.0.1:4310) in Edge or Chrome. This is a local app, not a hosted website. It opens in **Voice Arena → New test** by default.
+3. Open **Azure Settings** and configure only what your workspace needs:
+
+   | Workspace | What to configure |
+   | --- | --- |
+   | **Voice Arena** | An Azure OpenAI resource endpoint and key, plus at least one Realtime judge deployment. Save and test the judge connections. Configure Azure Speech as well if you use the optional Speech review flags, or turn those flags off in the test settings. |
+   | **Azure Voices Studio** | An Azure Speech region and key. Save and test the connection to load the regional voice catalog. |
+   | **Script Generation** | An Azure OpenAI text deployment that supports JSON output, plus Azure Speech for the locale catalog. Use the shared Azure OpenAI resource or enter a separate Foundry endpoint and key under **Script text deployment**. |
+   | **Folder Sorting** | No Azure account or key. The workspace uses the local Windows file system. |
+
+4. Start with one script, voice, or folder using the steps above. Azure operations can incur charges, including retries. Enter keys in **Azure Settings**; never put them in the repository. See [Azure configuration](#azure-configuration) for connection details.
 
 ## Workspaces and Azure Settings
 
@@ -131,7 +163,8 @@ The **Preview and save** progress bar shows the percentage of the current genera
 - In every locale, the Recording script generator asks for brief, varied acknowledgments, not repeated summaries or full sympathy sentences on routine turns. It keeps the target language primary and encourages code-switching where local speakers naturally use it. It also asks for useful dates, clock times, and time windows in most calls, using local conventions and digits. These are generation instructions, not fixed phrase lists.
 - **Agent gender** lets you select Female, Male, or both. Each selected gender gets its own script per locale with the opposite Customer gender and locally appropriate grammar. When both are selected, the model uses the same brief, domains, and Agent character target for each script but is asked to vary the incidents, causes, and fixes. Leaving both unchecked generates one script per locale with no required gender pairing. The selection is saved in this browser.
 - The model writes scenario, role, spoken content and tone. The app calculates the rest: **Turn** restarts at 1 for each conversation, **ID** counts up from **First ID** (default `4010000001`) independently in each file, preserving leading zeros, and **Wordcount** uses the locale's word-break rules (via `Intl.Segmenter`), so Chinese, Japanese and Thai are segmented rather than split on spaces. If the recorded role is missing or a recorded turn has no tone, the request is retried once with that feedback.
-- Large runs queue workbooks in locale order, with up to four workbooks in parallel initially and a maximum of twenty as batches succeed. Each workbook is one locale and Agent gender variant. Both gender variants of a locale can run together, with different scenario prompts and references to cases already saved in the companion workbook. Batches within each workbook stay sequential. The scheduler treats a level as stable once that many successful non-final batches have run at that limit. A rate limit or timeout falls back to the last stable level below the failed one, or halves the failed level if no such level is known. The scheduler honors Azure's retry delay when provided, then holds the reduced limit for at least one minute before probing higher again. The form shows the current limit and any cooldown. Up to three automatic retries are allowed per batch for these errors; if they are exhausted, the run pauses with its saved progress. Small runs stay sequential. **Generate scripts** does not share the Azure text slots while Recording script requests are active. **Stop** cancels active requests and keeps saved batches; **Regenerate** reruns only that script's locale and Agent gender. Azure charges may apply.
+- Large runs queue workbooks in locale order, with up to four workbooks in parallel initially and a maximum of twenty as batches succeed. Each workbook is one locale and Agent gender variant. Both gender variants of a locale can run together, with different scenario prompts and references to cases already saved in the companion workbook. Batches within each workbook stay sequential. The scheduler treats a level as stable once that many successful non-final batches have run at that limit. A rate limit or timeout falls back to the last stable level below the failed one, or halves the failed level if no such level is known. The scheduler honors Azure's retry delay when provided, then holds the reduced limit for at least one minute before probing higher again. Small runs stay sequential. **Generate scripts** does not share the Azure text slots while Recording script requests are active. **Stop** cancels active requests and pending retries while keeping saved batches; **Regenerate** reruns only that script's locale and Agent gender.
+- Recording script batches retry rate limits, timeouts, temporary server and connection errors, and invalid generated drafts until they succeed or you stop the run. The delay increases up to five minutes unless Azure asks for a longer wait. The app shows the retry time and error for each affected workbook. Errors that need manual attention, such as a content refusal, invalid credentials, or the workbook row limit, are shown on the affected workbook without stopping the others. Azure charges may apply to retries.
 - Targets above 1,800 Agent characters use batches of complete calls, with separate character budgets for each domain. The local server saves each validated batch before requesting the next. If a batch fails, or if you stop, refresh, or restart the app, use **Resume batch run** in the same browser to recover the latest run with its original generation settings. The browser remembers which run to reopen; the server keeps its rows in the local app data folder. Batches do not continue while the page is closed. Large previews show only the first 200 rows; copying and saving include the entire completed script in one workbook per locale and Agent gender. Azure charges may apply to each request.
 - The live progress list shows in-progress workbooks by saved Agent characters, highest first. This display order does not change the generation queue.
 - Files are named like `en-US_Recording_script_Female.xlsx` or `en-US_Recording_script_Male.xlsx`, based on the Agent gender used to generate that script. When unspecified, the filename has no gender suffix. IDs are stored as text to preserve leading zeroes and long values. Existing files are not overwritten. **Copy as text** still copies one locale's table as tab-separated text and appears beside **Regenerate**.
@@ -300,16 +333,7 @@ JavaScript call stack.
 
 The source is distributed through the **public** [garhe/voices-selection repository](https://github.com/garhe/voices-selection). Anyone can download it without a collaborator invitation. This is not a hosted website or a GitHub Pages app: each person runs their own local frontend and Node.js backend, with the same evaluation and reporting features.
 
-Install Git and Node.js 22.16+ (including npm), then run in PowerShell:
-
-```powershell
-git clone https://github.com/garhe/voices-selection.git
-Set-Location voices-selection
-npm ci
-npm run dev
-```
-
-Open **http://127.0.0.1:4310** in Edge or Chrome. Leave the terminal running while using the app; **Ctrl+C** stops it. On Windows, the existing `Start-VoiceLab.ps1` launcher is also available after cloning. The historical launcher name and local data-directory name are retained for compatibility.
+Follow [Quick setup](#quick-setup) to clone and launch the app. Leave the terminal running while using it; **Ctrl+C** stops the server. On Windows, the existing `Start-VoiceLab.ps1` launcher is also available after cloning. The historical launcher name and local data-directory name are retained for compatibility.
 
 ### Windows automatic startup and recovery
 

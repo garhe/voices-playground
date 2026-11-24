@@ -18,7 +18,7 @@ import type { AzureVoicesStudio } from './studio.js';
 import { ScriptGenerationRuns } from './scriptGenerationRun.js';
 import { scriptTagInspectionSchema, scriptTagRequestSchema } from '../shared/scriptTags.js';
 import { inspectScriptTags, processScriptTags } from './scriptTags.js';
-import { registerRecordingScript } from './recordingScript.js';
+import { RecordingDraftError, registerRecordingScript } from './recordingScript.js';
 import { RECORDING_BATCH_CONCURRENCY } from '../shared/recordingScript.js';
 
 const settingsFile = 'script-generation-settings.json';
@@ -409,9 +409,12 @@ export function registerScriptGeneration(app: Express, {
       await run(controller.signal);
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (!(batchWorkbook && error instanceof RetryableScriptError && error.batchBackoffStatus)) throw error;
+        if (batchWorkbook && error instanceof RecordingDraftError) {
+        res.status(422).json({ error: connection.redact(error) });
+        } else if (batchWorkbook && error instanceof RetryableScriptError) {
         if (error.retryAfterMs) res.set('Retry-After', String(Math.ceil(error.retryAfterMs / 1000)));
-        res.status(error.batchBackoffStatus).json({ error: error.message });
+        res.status(error.batchBackoffStatus ?? 502).json({ error: connection.redact(error) });
+        } else throw error;
       }
     } finally {
       res.off('close', onClose);

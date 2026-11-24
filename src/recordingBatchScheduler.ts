@@ -1,13 +1,18 @@
 import { RECORDING_BATCH_START_CONCURRENCY } from '../shared/recordingScript.js';
 
-function isAzureBackoff(error: unknown): error is Error & { status: 429 | 504; retryAfterMs?: number } {
-  return error instanceof Error && 'status' in error && (error.status === 429 || error.status === 504);
+function isRetryable(error: unknown): error is Error & { status: number; retryAfterMs?: number } {
+  return error instanceof Error && 'status' in error && typeof error.status === 'number'
+    && [422, 429, 500, 502, 503, 504].includes(error.status);
 }
 
 const PROBE_HOLD_MS = 60_000;
+const MAX_BACKOFF_MS = 5 * 60_000;
+const MAX_TIMER_MS = 2_147_483_647;
+
+export type RecordingBatchRetry = { attempt: number; retryAt: number; message: string };
 
 export class RecordingBatchScheduler {
-  private readonly queue: Array<{ start: () => void; reject: (error: Error) => void }> = [];
+  private readonly queue: Array<{ readyAt: number; start: () => void; reject: (error: Error) => void }> = [];
   private limit: number;
   private active = 0;
   private successes = 0;
@@ -24,11 +29,14 @@ export class RecordingBatchScheduler {
     onChange(this.limit, 0);
   }
 
-  async request<T extends { done: boolean }>(send: () => Promise<T>): Promise<T> {
+  async request<T extends { done: boolean }>(send: () => Promise<T>, onRetry?: (retry: RecordingBatchRetry) => void): Promise<T> {
+    let readyAt = 0;
     for (let attempt = 0; ; attempt++) {
-      try { return await this.enqueue(send, attempt); }
+      try { return await this.enqueue(send, attempt, readyAt); }
       catch (error) {
-        if (this.closed || !isAzureBackoff(error) || attempt >= 3) throw error;
+        if (this.closed || !isRetryable(error)) throw error;
+        readyAt = Math.max(this.cooldownUntil, Date.now() + this.retryDelay(attempt, error.retryAfterMs));
+        onRetry?.({ attempt: attempt + 1, retryAt: readyAt, message: error.message });
       }
     }
   }
@@ -39,10 +47,15 @@ export class RecordingBatchScheduler {
     for (const queued of this.queue.splice(0)) queued.reject(new Error('Recording batch scheduling stopped.'));
   }
 
-  private enqueue<T extends { done: boolean }>(send: () => Promise<T>, attempt: number): Promise<T> {
+  private retryDelay(attempt: number, providerDelay = 0) {
+    return Math.max(Math.min(MAX_TIMER_MS, providerDelay), Math.min(MAX_BACKOFF_MS, this.baseDelayMs * 2 ** Math.min(attempt, 16)));
+  }
+
+  private enqueue<T extends { done: boolean }>(send: () => Promise<T>, attempt: number, readyAt: number): Promise<T> {
     return new Promise((resolve, reject) => {
       if (this.closed) { reject(new Error('Recording batch scheduling stopped.')); return; }
       this.queue.push({
+        readyAt,
         reject,
         start: () => {
           const epoch = this.epoch;
@@ -61,7 +74,7 @@ export class RecordingBatchScheduler {
             }
             resolve(result);
           }, (error: unknown) => {
-            if (!this.closed && isAzureBackoff(error)) {
+            if (!this.closed && isRetryable(error) && (error.status === 429 || error.status === 504)) {
               if (epoch === this.epoch) {
                 this.epoch++;
                 if (this.lastStableLimit !== undefined && this.lastStableLimit < limitAtStart) {
@@ -72,8 +85,7 @@ export class RecordingBatchScheduler {
                 }
                 this.successes = 0;
               }
-              const providerDelay = error.retryAfterMs ?? 0;
-              const delay = Math.min(2_147_483_647, Math.max(providerDelay, this.baseDelayMs * 2 ** attempt));
+              const delay = this.retryDelay(attempt, error.retryAfterMs);
               this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + delay);
               this.probeAfter = this.cooldownUntil + PROBE_HOLD_MS;
               this.onChange(this.limit, this.cooldownUntil);
@@ -91,16 +103,25 @@ export class RecordingBatchScheduler {
 
   private drain() {
     clearTimeout(this.timer);
-    if (this.closed || !this.queue.length) return;
-    const wait = this.cooldownUntil - Date.now();
+    if (this.closed) return;
+    const now = Date.now();
+    const wait = this.cooldownUntil - now;
     if (wait > 0) {
-      this.timer = setTimeout(() => this.drain(), wait);
+      if (this.queue.length) this.timer = setTimeout(() => this.drain(), wait);
       return;
     }
     if (this.cooldownUntil) {
       this.cooldownUntil = 0;
       this.onChange(this.limit, 0);
     }
-    while (this.active < this.limit && this.queue.length) this.queue.shift()?.start();
+    while (this.active < this.limit && this.queue.length) {
+      const index = this.queue.findIndex(item => item.readyAt <= now);
+      if (index < 0) {
+        const next = Math.min(...this.queue.map(item => item.readyAt));
+        this.timer = setTimeout(() => this.drain(), next - now);
+        return;
+      }
+      this.queue.splice(index, 1)[0].start();
+    }
   }
 }

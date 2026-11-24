@@ -22,6 +22,8 @@ export type RecordingScriptDependencies = {
 
 const MAX_ATTEMPTS = 2;
 
+export class RecordingDraftError extends Error {}
+
 export function recordingInstructions(recordedRole: string): string {
   const role = recordedRole.trim();
   return [
@@ -160,7 +162,7 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
         signal.throwIfAborted();
         return { locale: locale.value, agentGender: input.agentGender, rows };
       }
-      throw new Error(`Azure OpenAI did not return a usable recording script for ${locale.value}. ${feedback ?? ''} Try Regenerate or clarify the brief.`.trim());
+      throw new RecordingDraftError(`Azure OpenAI did not return a usable recording script for ${locale.value}. ${feedback ?? ''} Try Regenerate or clarify the brief.`.trim());
   }
 
   app.post('/api/recording-script/generate', async (req, res) => {

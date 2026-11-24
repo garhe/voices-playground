@@ -10,7 +10,7 @@ import {
 } from '../shared/recordingScript';
 import type { ScriptLocaleOption } from '../shared/scriptGeneration';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
-import { RecordingBatchScheduler } from './recordingBatchScheduler';
+import { RecordingBatchScheduler, type RecordingBatchRetry } from './recordingBatchScheduler';
 
 const BRIEF_STORAGE_KEY = 'voices-playground.recording-script-brief.v1';
 const DOMAINS_STORAGE_KEY = 'voices-playground.recording-script-domains.v1';
@@ -128,6 +128,7 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
   const [results, setResults] = useState<{ order: RecordingVariant[]; byVariant: Record<string, LocaleResult>; recordedRole: string }>();
   const [generating, setGenerating] = useState<string[]>();
   const [batchScheduling, setBatchScheduling] = useState<{ limit: number; cooldownUntil: number }>();
+  const [batchRetries, setBatchRetries] = useState<Record<string, RecordingBatchRetry>>({});
   const [runProgress, setRunProgress] = useState<GenerationProgress>();
   const [savedRun, setSavedRun] = useState<RecordingBatchRun>();
   const [generationError, setGenerationError] = useState('');
@@ -226,7 +227,7 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
   }
 
   async function generateLocale(input: RecordingGenerateRequest, signal: AbortSignal, runId: string | undefined,
-    scheduler: RecordingBatchScheduler | undefined, isPaused: () => boolean, paired?: true): Promise<LocaleResult | undefined> {
+    scheduler: RecordingBatchScheduler | undefined, paired?: true): Promise<LocaleResult> {
     try {
       let script: RecordingScriptData;
       if (runId && scheduler && usesRecordingBatches(input)) {
@@ -235,16 +236,21 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
           signal.throwIfAborted();
           const progress = await scheduler.request(async () => {
             signal.throwIfAborted();
+            setBatchRetries(current => {
+              if (!current[key]) return current;
+              const next = { ...current };
+              delete next[key];
+              return next;
+            });
             setGenerating(current => [...(current ?? []), key]);
             try {
               return recordingBatchResultSchema.parse(await request<unknown>('/api/recording-script/batch', { runId, input, paired }, 'POST', signal));
             } finally { setGenerating(current => current?.filter(activeKey => activeKey !== key)); }
-          });
+          }, retry => setBatchRetries(current => ({ ...current, [key]: retry })));
           signal.throwIfAborted();
           if (progress.done) { script = progress.script; break; }
           const batch = { label: variantLabel(input), characters: progress.characters, batches: progress.batches, target: input.totalCharacters };
           setRunProgress(current => current && { ...current, batches: { ...current.batches, [key]: batch } });
-          if (isPaused()) return;
         }
       } else {
         script = recordingScriptSchema.parse(await request<unknown>('/api/recording-script/generate', input, 'POST', signal));
@@ -253,7 +259,6 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
       return { script };
     } catch (error) {
       signal.throwIfAborted();
-      if (isPaused()) return;
       return { error: errorText(error) };
     }
   }
@@ -263,12 +268,13 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
     const controller = new AbortController();
     generation.current = controller;
     setGenerating([]);
+    setBatchRetries({});
     setGenerationError(''); setSaved(undefined); setSaveError('');
     setRunProgress({ total: targets.length, completed: 0 });
     const byVariant: Record<string, LocaleResult> = replace ? {} : { ...results?.byVariant };
     if (replace) setResults({ order: targets, byVariant: {}, recordedRole: input.recordedRole });
     const targetKeys = new Set(targets.map(recordingVariantKey));
-    let paused = false;
+    let blocked = 0;
     const concurrency = runId ? Math.min(targets.length, RECORDING_BATCH_CONCURRENCY) : 1;
     const scheduler = runId ? new RecordingBatchScheduler(concurrency,
       (limit, cooldownUntil) => setBatchScheduling({ limit, cooldownUntil })) : undefined;
@@ -277,7 +283,6 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
     const queue = targets.values();
     async function worker() {
       for (const target of queue) {
-        if (paused) return;
         controller.signal.throwIfAborted();
         const key = recordingVariantKey(target);
         const siblingKey = target.agentGender && recordingVariantKey({
@@ -288,9 +293,8 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
         const previousScenarios = other && 'script' in other ? [...new Set(other.script.rows.map(row => row.scenario))] : input.previousScenarios;
         if (!scheduler) setGenerating(current => [...(current ?? []), key]);
         const result = await generateLocale({ ...input, locale: target.locale, agentGender: target.agentGender, previousScenarios },
-          controller.signal, runId, scheduler, () => paused, paired);
+          controller.signal, runId, scheduler, paired);
         if (!scheduler) setGenerating(current => current?.filter(activeKey => activeKey !== key));
-        if (!result) return;
         byVariant[key] = result;
         setResults(previous => previous && { ...previous, byVariant: { ...previous.byVariant, [key]: result } });
         if ('script' in result) setRunProgress(current => {
@@ -300,10 +304,8 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
           return { ...current, completed: current.completed + 1, batches };
         });
         if (runId && 'error' in result) {
-          paused = true;
-          scheduler?.close();
-          setGenerationError('Batch run paused. Resume the saved run to retry without losing completed batches.');
-          return;
+          blocked++;
+          setGenerationError(`${blocked} ${blocked === 1 ? 'workbook needs' : 'workbooks need'} attention. Other workbooks can continue. See the errors in Preview and save.`);
         }
       }
     }
@@ -311,12 +313,14 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
       const settled = await Promise.allSettled(Array.from({ length: concurrency }, () => worker()));
       const failure = settled.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
+      if (blocked) setGenerationError(`${blocked} ${blocked === 1 ? 'workbook needs' : 'workbooks need'} attention. Resolve the errors in Preview and save, then resume the saved batch run.`);
     } catch (error) {
       if (!controller.signal.aborted) setGenerationError(errorText(error));
     } finally {
       controller.signal.removeEventListener('abort', stopScheduling);
       scheduler?.close();
       setBatchScheduling(undefined);
+      setBatchRetries({});
       if (generation.current === controller) generation.current = undefined;
       setGenerating(undefined);
     }
@@ -494,9 +498,16 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
         const label = variantLabel(target);
         const regenerate = <button className="secondary" type="button" disabled={!ready || busy || azureBusy} aria-label={`Regenerate ${label}`}
           onClick={() => regenerateVariant(target, results.recordedRole)}>Regenerate</button>;
-        if (!result) return <div className="script-preview" key={key}><p><strong>{label}</strong> · {generating?.includes(key) ? 'Generating…' : 'Waiting'}</p>{!generating && <div className="button-row">{regenerate}</div>}</div>;
+        if (!result) {
+          const retry = batchRetries[key];
+          return <div className="script-preview" key={key}>
+            <p><strong>{label}</strong> · {generating?.includes(key) ? 'Generating…' : retry ? 'Waiting to retry' : 'Waiting'}</p>
+            {retry && <p className="muted" role="status">{retry.message} Retry #{retry.attempt} after {new Date(Math.max(retry.retryAt, batchScheduling?.cooldownUntil ?? 0)).toLocaleTimeString()}.</p>}
+            {!generating && <div className="button-row">{regenerate}</div>}
+          </div>;
+        }
         if ('error' in result) return <div className="script-preview script-locale-issue" key={key}>
-          <p><strong>{label}</strong> · Not generated</p><p className="error-text">{result.error}</p>
+          <p><strong>{label}</strong> · Needs attention</p><p className="error-text">{result.error}</p>
           <div className="button-row">{regenerate}</div>
         </div>;
         const script = numberedByVariant.get(key) ?? result.script;
