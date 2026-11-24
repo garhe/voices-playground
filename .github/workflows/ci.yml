@@ -27,5 +27,11 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # On Windows the default user temp path can contain an 8.3 alias.
+      # Use the runner's temp directory so path-safety tests use canonical paths.
       - run: npm test
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
       - run: npm run build

@@ -55,7 +55,7 @@ test('judge numbers, fields and remove buttons share a bottom edge and control h
 test('workspace filters share compact controls and wrap to the available container width', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.filter-bar, \.field-row\.filter-bar \{[^}]*repeat\(auto-fit, minmax\(min\(100%, 11rem\), 1fr\)\)/);
-  assert.match(css, /\.filter-bar input:not\(\[type=checkbox\]\), \.filter-bar select \{ height: 36px; min-height: 36px;/);
+  assert.match(css, /\.filter-bar input:not\(\[type=checkbox\]\), \.filter-bar select(?:, [^{]+)? \{ height: 36px; min-height: 36px;/);
   assert.match(css, /\.filter-bar \.multi-filter-trigger \{[^}]*height: 36px; min-height: 36px;/);
   assert.match(css, /\.filter-bar \.date-control input \{ padding-right: 44px; \}/);
   assert.match(css, /\.filter-bar--single \{ width: 100%; max-width: 24rem; \}/);
@@ -122,9 +122,8 @@ test('workspace omits the preview badge and redundant bottom footer without disa
   assert.ok(html.includes('Azure usage is billed per your deployment'));
   assert.ok(html.includes('Drop a folder or select your voice collection'));
   assert.ok(html.includes('AI opinion scores are not validated MOS'));
-  assert.match(html, /<option value="single">Single speaker<\/option>/);
-  assert.match(html, /<option value="agent" selected="">Agent only<\/option>/);
-  assert.match(html, /<option value="both">Both, scored separately<\/option>/);
+  assert.match(html, /<summary><span>01 · Evaluation settings/);
+  assert.doesNotMatch(html, /<option value="both">Both, scored separately<\/option>/);
   assert.doesNotMatch(html, /<option value="customer">Customer only<\/option>/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /main \{ max-width: none; padding-bottom: 8px; \}/);
@@ -980,14 +979,14 @@ test('test type is visible for both evaluation stages in list rows and selected-
 test('setup sections support native collapse and queue/start actions live in the fixed action region', () => {
   const html = renderToStaticMarkup(createElement(App));
   assert.equal((html.match(/<details class="card setup-section" open=""/g) ?? []).length, 2);
-  assert.match(html, /<summary><span>01 · Choose your evaluation/);
+  assert.match(html, /<summary><span>01 · Evaluation settings/);
   assert.match(html, /<summary><span>02 · Your judging panel/);
   assert.match(html, /class="evaluation-action-bar" role="region" aria-label="Evaluation actions"/);
   assert.match(html, /Review readiness &amp; usage/);
   assert.match(html, /class="setup-grid" data-evaluation-open="true" data-panel-open="true"/);
   assert.match(html, /<details class="card recordings-card setup-section" open=""/);
-  assert.match(html, /<summary><span>03 · Bring your recordings/);
-  assert.match(html, /0 recordings · 0 voices · 0 included/);
+  assert.match(html, /<summary><span>03 · Bring your audio files/);
+  assert.match(html, /0 audio files · 0 voices · 0 included/);
   assert.match(html, />Add to queue<\/button>/);
   assert.match(html, /FS<\/span> Folder Sorting/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
@@ -1051,7 +1050,8 @@ test('test titles remain text links and status colors stay semantic rather than 
   assert.match(css, /\.status-badge, \.status-badge\.completed, \.status-badge\.running, \.status-badge\.queued,[^}]*background: Canvas; color: CanvasText/);
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   assert.match(source, /className=\{`status-badge \$\{h.status\}`\}/);
-  assert.match(source, /className=\{`status-badge \$\{r.status\}`\}/);
+  const library = readFileSync(new URL('../src/TestLibrary.tsx', import.meta.url), 'utf8');
+  assert.match(library, /className=\{`status-badge \$\{entry.status\}`\}/);
 });
 
 test('expandable headings are plain full-row disclosures rather than nested button surfaces', () => {
@@ -1103,7 +1103,9 @@ test('result views include the complete evaluation without a judge-language filt
   assert.match(source, /const summary = job \? summarize\(job\) : \[\]/);
   assert.match(source, /const voiceEvidence = job \? summarizeVoiceEvidence\(job\) : \[\]/);
   assert.match(source, /<VoiceImprovement job=\{job\} voices=\{voiceDirectorBriefs\(job\)\}/);
-  assert.match(source, /\{job\.clips\.map\(c => <details className="clip-detail"/);
+  assert.match(source, /<VoiceEvidenceTree job=\{job\}/);
+  const evidence = readFileSync(new URL('../src/VoiceEvidenceTree.tsx', import.meta.url), 'utf8');
+  assert.match(evidence, /for \(const clip of job\.clips\)/);
 });
 
 test('report surfaces and exports expose saved improvement cases without inventing legacy defects', () => {

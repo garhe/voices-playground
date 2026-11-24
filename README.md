@@ -16,7 +16,7 @@ Voices Playground is a local app for creating multilingual scripts, synthesizing
 1. On Windows, install **Git** and **Node.js 22.16 or later** (including npm). Open PowerShell and run:
 
    ```powershell
-   git clone --branch publish/voices-playground-update https://github.com/garhe/voices-selection.git
+   git clone https://github.com/garhe/voices-selection.git
    Set-Location voices-selection
    npm ci
    npm run dev

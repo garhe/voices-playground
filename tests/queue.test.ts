@@ -395,6 +395,7 @@ test('targeted retries join the FIFO queue, preserve other judgments, and allow 
     firstGate.release();
     await until(state, value => value.active?.id === a.id);
     assert.equal((await post(`/api/jobs/${a.id}/retry`, { consent: true })).status, 409);
+    await until(async () => calls.length, count => count >= 2);
     assert.deepEqual(calls, ['Active', 'Retry A']);
     retryGate.release();
     await until(state, value => !value.active && !value.waiting.length);
