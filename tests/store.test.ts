@@ -1,11 +1,48 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Store } from '../server/store.js';
+import { clip, job } from './fixtures.js';
+
+test('report projections share concurrent scans and reread only added or changed jobs', async context => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-projections-'));
+  const store = new Store(root);
+  try {
+    await store.init();
+    const first = job([clip()], [4]);
+    const second = job([clip()], [3]);
+    await store.saveJob(first);
+    await store.saveJob(second);
+    const reads = context.mock.method(store, 'read');
+    let projections = 0;
+    const load = store.jobProjections(value => {
+      projections++;
+      return { id: value.id, name: value.name, status: value.status };
+    });
+    const initial = load();
+    assert.equal(load(), initial);
+    assert.equal((await initial).length, 2);
+    assert.deepEqual(await load(), await initial);
+    assert.equal(reads.mock.callCount(), 2);
+    assert.equal(projections, 2);
+
+    await store.saveJob({ ...first, name: 'Updated report', status: 'queued' });
+    const updated = await load();
+    assert.deepEqual(updated.find(item => item.id === first.id), { id: first.id, name: 'Updated report', status: 'queued' });
+    assert.equal(reads.mock.callCount(), 3);
+
+    await store.remove(path.join('jobs', `${second.id}.json`));
+    const third = job([clip()], [5]);
+    await store.saveJob(third);
+    assert.deepEqual((await load()).map(item => item.id).sort(), [first.id, third.id].sort());
+    assert.equal(reads.mock.callCount(), 4);
+    assert.equal(projections, 4);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('temporary Windows rename locks retry the same atomic save without losing queued updates', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-lock-'));
@@ -63,6 +100,63 @@ test('non-lock errors are surfaced immediately, not retried or replaced with a s
     await assert.rejects(store.save('settings.json', {}), error => error === failure);
     assert.equal(calls, 1);
     assert.equal(await store.exists('settings.json'), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('job checkpoints recover rename locks that outlast the standard six retries', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-job-lock-'));
+  let attempts = 0;
+  const store = new Store(root, async (source, destination) => {
+    if (++attempts <= 7) throw Object.assign(new Error('Long temporary lock'), { code: 'EPERM' });
+    await rename(source, destination);
+  });
+  try {
+    await store.init();
+    const value = job([clip()], [4]);
+    await store.saveJob(value);
+    assert.equal(attempts, 8);
+    assert.deepEqual(await store.jobs(), [JSON.parse(JSON.stringify(value))]);
+    const raw = await readFile(path.join(root, 'save-diagnostics.jsonl'), 'utf8');
+    const [blocked, recovered, ...extra] = raw.trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(extra, []);
+    assert.deepEqual(
+      [blocked, recovered].map(({ event, jobId, operation, code, attempt }) => ({ event, jobId, operation, code, attempt })),
+      [
+        { event: 'save-blocked', jobId: value.id, operation: 'rename', code: 'EPERM', attempt: 1 },
+        { event: 'save-recovered', jobId: value.id, operation: 'rename', code: 'EPERM', attempt: 8 },
+      ],
+    );
+    assert.equal(blocked.pid, process.pid);
+    assert.match(blocked.timestamp, /Z$/);
+    assert.ok(recovered.elapsedMs >= 3000);
+    assert.ok(!raw.includes(value.clips[0].file), 'Do not log evaluation inputs.');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('job failure and queue pause are logged with bounded local retention', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-store-diagnostics-'));
+  const file = path.join(root, 'save-diagnostics.jsonl');
+  const store = new Store(root, async () => {
+    throw Object.assign(new Error('Sensitive details not for the diagnostic log'), { code: 'ENOSPC' });
+  });
+  try {
+    await store.init();
+    await writeFile(file, Buffer.alloc(1024 * 1024));
+    const value = job([clip()], [4]);
+    await assert.rejects(store.saveJob(value), { code: 'ENOSPC' });
+    await store.recordSavePause(value.id, { phase: 'running', checkpoint: 'memory-only' });
+    assert.equal((await readFile(`${file}.1`)).length, 1024 * 1024);
+    const raw = await readFile(file, 'utf8');
+    assert.ok(!raw.includes('Sensitive details'));
+    const [failure, pause, ...extra] = raw.trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(extra, []);
+    assert.equal(failure.event, 'save-failed');
+    assert.equal(failure.code, 'ENOSPC');
+    assert.equal(failure.attempt, 1);
+    assert.equal(pause.event, 'queue-paused');
+    assert.equal(pause.jobId, value.id);
+    assert.equal(pause.phase, 'running');
+    assert.equal(pause.checkpoint, 'memory-only');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

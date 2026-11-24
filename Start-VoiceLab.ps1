@@ -24,7 +24,7 @@ if (-not (Test-Path (Join-Path $PSScriptRoot 'node_modules'))) {
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 }
 
-Write-Host 'Starting Voices Selection at http://127.0.0.1:4310 (or PORT from .env).'
+Write-Host 'Starting Voices Playground at http://127.0.0.1:4310 (or PORT from .env).'
 if ($AutoRestart) {
     $logDirectory = Join-Path $env:LOCALAPPDATA 'VoiceQualityWorkbench\logs'
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null

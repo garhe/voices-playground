@@ -45,7 +45,7 @@ test('automatic readiness requires credentials and a panel, without permission o
   assert.equal(evaluationBlockers(input).length, 2);
   assert.equal(evaluationBlockers(input).some(b => /Confirm speaker/.test(b)), false);
 });
-test('automatic input counts include every window and both roles for the 200-input cap', () => {
+test('automatic input counts include every window and both roles without blocking large tests', () => {
   const recordings = [{ include: true, regions: [], duration: 120.1 }];
   assert.equal(inputCount(recordings, 'both', 'automatic'), 4);
   const blockers = evaluationBlockers({
@@ -53,8 +53,7 @@ test('automatic input counts include every window and both roles for the 200-inp
     config: { configured: true, judges: [{ id: crypto.randomUUID(), name: 'Judge', deployment: 'test' }] },
     recordings: Array.from({ length: 51 }, () => recordings[0]),
   });
-  assert.equal(blockers.length, 1);
-  assert.match(blockers[0], /at most 200/);
+  assert.deepEqual(blockers, []);
 });
 test('automatic assessments require matching role evidence and never score ambiguous or absent targets', () => {
   assert.throws(() => normalizeAssessment(assessment(), automatic, 'agent'), /requires attribution/);

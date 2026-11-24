@@ -1,20 +1,40 @@
 import { useState } from 'react';
 import { activeDimensions, unassessedInputs, type Job } from '../shared/domain';
+import { useTableSort } from './TableSort';
 
 type AssessmentIssue = ReturnType<typeof unassessedInputs>[number];
 
+export function runningAssessments({ clips, judges, results }: Job) {
+  const clipsById = new Map(clips.map(clip => [clip.id, clip]));
+  const judgesById = new Map(judges.map(judge => [judge.id, judge]));
+  return results.flatMap(result => {
+    if (result.status !== 'running') return [];
+    const clip = clipsById.get(result.clipId);
+    const judge = judgesById.get(result.judgeId);
+    return clip && judge ? [{ clip, judge }] : [];
+  });
+}
+
 export function AssessmentIssueTable({ issues }: { issues: AssessmentIssue[] }) {
-  return <div className="table-scroll"><table>
-    <thead><tr><th>Voice</th><th>Audio / requested role</th><th>Judge</th><th>Status</th><th>Reasons</th></tr></thead>
-    <tbody>{issues.flatMap(({ clip, judges }) => judges.map(({ judge, result, gaps }) =>
+  const sorting = useTableSort();
+  const rows = issues.flatMap(({ clip, judges }) => judges.map(({ judge, result, gaps }) => ({
+    clip, judge, status: result?.status ?? 'Missing',
+    reasons: [...new Set([...gaps, ...(result?.assessment?.limitations ?? [])])],
+  })));
+  return <div className="table-scroll" tabIndex={0} role="region" aria-label="Assessment issues"><table>
+    <thead><tr>{sorting.header('voice', 'Voice')}{sorting.header('audio', 'Audio / requested role')}{sorting.header('judge', 'Judge')}{sorting.header('status', 'Status')}{sorting.header('reasons', 'Reasons')}</tr></thead>
+    <tbody>{sorting.rows(rows, {
+      voice: row => row.clip.voice, audio: row => `${row.clip.file} / ${row.clip.role}`, judge: row => row.judge.name,
+      status: row => row.status, reasons: row => row.reasons.join(' '),
+    }).map(({ clip, judge, status, reasons }) =>
       <tr key={`${clip.id}:${judge.id}`}>
         <td>{clip.voice}</td>
         <td>{clip.file}<small>{clip.role} · {clip.start.toFixed(2)}–{clip.end.toFixed(2)} s</small></td>
         <td>{judge.name}<small>{judge.deployment}</small></td>
-        <td>{result?.status ?? 'Missing'}</td>
-        <td><ul>{[...new Set([...gaps, ...(result?.assessment?.limitations ?? [])])].map(reason =>
+        <td>{status}</td>
+        <td><ul>{reasons.map(reason =>
           <li key={reason}>{reason}</li>)}</ul></td>
-      </tr>))}</tbody>
+      </tr>)}</tbody>
   </table></div>;
 }
 
@@ -26,9 +46,7 @@ export function EvaluationProgress({ job, recordingQualityLabel }: { job: Job; r
     ...input, judges: input.judges.filter(({ result }) => result?.status === 'failed'),
   })).filter(input => input.judges.length > 0);
   const count = (inputs: AssessmentIssue[]) => inputs.reduce((total, input) => total + input.judges.length, 0);
-  const running = job.clips.flatMap(clip => job.judges.flatMap(judge =>
-    job.results.some(result => result.clipId === clip.id && result.judgeId === judge.id && result.status === 'running')
-      ? [{ clip, judge }] : []));
+  const running = runningAssessments(job);
   const panelId = `assessment-issues-${job.id}`;
   return <>
     <div className="progress-track" role="progressbar" aria-label="Judge assessments finished"

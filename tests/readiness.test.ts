@@ -370,16 +370,16 @@ test('invalid panel, missing credentials, busy state and running evaluations exp
   assert.ok(blockers.some(b => /current operation/.test(b)));
   assert.ok(blockers.some(b => /running evaluation/.test(b)));
 });
-test('excerpt cap and test-name boundary use the actual supported thresholds', () => {
+test('large excerpt selections remain ready while the test-name boundary is enforced', () => {
   const input = readyInput();
   input.recordings[0].regions = Array.from({ length: 200 }, () => region());
   input.name = 'a'.repeat(120);
   assert.deepEqual(evaluationBlockers(input), []);
   input.recordings[0].regions.push(region());
+  assert.deepEqual(evaluationBlockers(input), []);
   input.name += 'a';
   const blockers = evaluationBlockers(input);
   assert.ok(blockers.some(b => /120 characters/.test(b)));
-  assert.ok(blockers.some(b => /at most 200/.test(b)));
 });
 test('panels have no fixed count limit while names, deployments and unique IDs stay required', () => {
   const input = readyInput();

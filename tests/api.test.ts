@@ -692,7 +692,7 @@ test('restart marks in-flight work interrupted but preserves completed assessmen
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('a fatal save failure aborts and drains parallel judges before releasing the run, preserving completed results', async () => {
+for (const manualPause of [false, true]) test(`save recovery keeps the same test first and ${manualPause ? 'honors an explicit pause' : 'resumes without Start queue'}`, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-save-failure-'));
   const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -700,15 +700,23 @@ test('a fatal save failure aborts and drains parallel judges before releasing th
   const secondReady = new Promise<void>(resolve => { secondStarted = resolve; });
   const abortReceived = new Promise<void>(resolve => { aborted = resolve; });
   const cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
-  let settled = false, failedSave = false;
+  let settled = false, failedSave = false, blocked = true, saveAttempts = 0;
+  const calls: string[] = [];
+  const successfulJudge = () => {
+    const value = assessment(4);
+    value.scores.contextFit = 4;
+    return { assessment: value, model: 'local-fixture' };
+  };
   const { app, errors, store, cancelActive } = await createApp({
     dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
-    deployments: 'first,second',
+    deployments: 'first,second', saveRetryDelayMs: 15,
     evaluate: async options => {
+      calls.push(options.judge.deployment);
       if (options.judge.deployment === 'first') {
         await secondReady;
-        return { assessment: assessment(4), model: 'local-fixture' };
+        return successfulJudge();
       }
+      if (!blocked) return successfulJudge();
       return new Promise((_resolve, reject) => {
         options.signal.addEventListener('abort', () => {
           aborted();
@@ -724,7 +732,10 @@ test('a fatal save failure aborts and drains parallel judges before releasing th
       failedSave = true;
       throw Object.assign(new Error('Simulated persistent rename lock'), { code: 'EPERM' });
     }
-    if (value.status === 'interrupted') await new Promise(resolve => setTimeout(resolve, 40));
+    if (blocked && failedSave && value.name === 'Persistence failure test') {
+      saveAttempts++;
+      throw Object.assign(new Error('Simulated persistent rename lock'), { code: 'EPERM' });
+    }
     return saveJob(value);
   };
   app.use(errors); server.on('request', app);
@@ -739,23 +750,56 @@ test('a fatal save failure aborts and drains parallel judges before releasing th
       pcm: Buffer.alloc(48000).toString('base64'),
     })).status, 201);
     const input = { name: 'Persistence failure test', profile, clipIds: [id], consent: true };
-    const started = await (await post('/api/jobs', input)).json() as Job;
+    const response = await post('/api/jobs', input);
+    assert.equal(response.status, 201);
+    const started = await response.json() as Job;
     for (let n = 0; !failedSave && n < 100; n++) await new Promise(resolve => setTimeout(resolve, 5));
     assert.equal(failedSave, true);
     await abortReceived;
     assert.equal(settled, false);
     assert.equal((await post('/api/jobs', input)).status, 409, 'Do not release the run while another judge is still cleaning up.');
+    const later = await (await post('/api/jobs', { ...input, name: 'Later test', enqueue: true })).json() as Job;
+    const queue = async () => (await fetch(url + '/api/queue')).json();
     releaseCleanup();
     let done = started;
     for (let n = 0; n < 100; n++) {
-      done = await (await fetch(url + `/api/jobs/${started.id}`)).json() as Job;
-      if (done.status !== 'running') break;
+      if ((await queue()).recoveringSave && saveAttempts >= 3) break;
       await new Promise(resolve => setTimeout(resolve, 5));
     }
+    const recovering = await queue();
     assert.equal(settled, true);
-    assert.equal(done.status, 'interrupted');
+    assert.ok(saveAttempts >= 3, 'Local saves are retried repeatedly without user input.');
+    assert.equal(recovering.paused, false);
+    assert.equal(recovering.recoveringSave, true);
+    assert.equal(recovering.active, undefined);
+    assert.match(recovering.error, /checkpoint is in memory.*Retrying the local save automatically/);
+    assert.deepEqual(recovering.waiting.map(({ id }: { id: string }) => id), [started.id, later.id]);
+    done = await (await fetch(url + `/api/jobs/${started.id}`)).json() as Job;
+    assert.equal(done.status, 'queued');
     assert.equal(done.results.filter(r => r.status === 'completed').length, 1);
-    assert.deepEqual((await store.jobs())[0], done, 'Interrupted status is not exposed before its final save settles.');
+    assert.deepEqual(calls, ['first', 'second'], 'Do not call Azure until the checkpoint can be saved.');
+    if (manualPause) {
+      const paused = await (await post('/api/queue/pause', {})).json();
+      assert.equal(paused.paused, true);
+      assert.equal(paused.recoveringSave, false);
+      const attemptsAtPause = saveAttempts;
+      blocked = false;
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(saveAttempts, attemptsAtPause);
+      assert.deepEqual(calls, ['first', 'second']);
+      assert.equal((await post('/api/queue/start', { consent: true })).status, 200);
+    }
+    blocked = false;
+    for (let n = 0; n < 100; n++) {
+      const state = await queue();
+      if (!state.active && !state.waiting.length) break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const saved = await store.jobs();
+    assert.equal(saved.find(job => job.id === started.id)?.status, 'completed');
+    assert.equal(saved.find(job => job.id === later.id)?.status, 'completed');
+    assert.equal((await queue()).error, undefined);
+    assert.deepEqual(calls, ['first', 'second', 'second', 'first', 'second']);
   } finally {
     releaseCleanup(); cancelActive();
     await new Promise<void>(resolve => server.close(() => resolve()));

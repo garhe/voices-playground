@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en"<!--THEME_MIX-->>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>Voice Arena | Scorecard</title>
+  <style><!--WORKSPACE_CSS--></style>
+  <style>
+    .shared-scorecard .nav { text-decoration: none; }
+    .shared-scorecard .sidebar-foot { margin-top: auto; }
+    .shared-scorecard section { scroll-margin-top: 1rem; }
+    .shared-scorecard .arena-card { grid-template-columns: minmax(0, 1fr); }
+    .shared-scorecard .arena-card .table-scroll { margin-top: 0; }
+    .shared-scorecard #matrix-heading { margin-bottom: .6rem; }
+    .shared-scorecard #matrix > p { margin-bottom: .8rem; }
+    .shared-scorecard .table-scroll small { display: block; color: var(--mica-muted); }
+    .shared-scorecard .table-scroll th:last-child { max-width: none; }
+    .shared-scorecard .table-scroll tbody th { overflow-wrap: anywhere; }
+    .shared-scorecard .multi-filter-popup label[hidden] { display: none; }
+    .shared-scorecard .multi-filter-popup input[type=checkbox] { flex: none; }
+    .dimension-table tbody th { white-space: normal; }
+    #issue-groups { display: grid; gap: .5rem; }
+    .issue-voice, .issue-domain, .issue-locale { border: 1px solid var(--mica-border); border-radius: 8px; overflow-wrap: anywhere; }
+    .issue-voice, .issue-locale { background: var(--mica-inset); }
+    .issue-voice > summary, .issue-locale > summary { cursor: pointer; padding: .6rem .85rem; }
+    .issue-domain { margin: 0 .65rem .65rem; padding: .75rem; background: var(--mica-surface); }
+    .issue-domain h3, .issue-domain p { margin: 0; }
+    .issue-domain-head { display: flex; align-items: start; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; margin-bottom: .65rem; }
+    .issue-domain-score { font-variant-numeric: tabular-nums; }
+    .issue-locale + .issue-locale { margin-top: .3rem; }
+    .issue-locale-meta { display: inline-flex; gap: .25rem .75rem; flex-wrap: wrap; }
+    .issue-locale-body { padding: 0 .85rem .75rem; }
+    .issue-locale-body ol { margin: 0; padding-inline-start: 1.3rem; }
+    .issue-locale-body li + li { margin-top: .65rem; }
+    .issue-symptoms { margin: .45rem 0; }
+    .issue-symptoms h4, .issue-guidance h4 { margin: 0 0 .2rem; font-size: .95em; }
+    .issue-symptoms p { margin: 0 0 .2rem; color: var(--mica-muted); }
+    .issue-symptoms ul { margin: 0; padding-inline-start: 1.25rem; }
+    .issue-guidance { display: grid; gap: .55rem; margin: .45rem 0 0; padding-inline-start: .65rem; border-inline-start: 2px solid var(--mica-border); }
+    .issue-guidance p { margin: 0; }
+    #detail { width: min(36rem, 94vw); max-height: 90vh; }
+    #detail-title { overflow-wrap: anywhere; }
+    #detail dt { font-weight: 650; }
+    #detail dd { margin: 0 0 .4rem; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      .shared-scorecard { display: block; }
+      .shared-scorecard .sidebar { position: static; width: 100%; height: auto; padding: .75rem 1rem; }
+      .shared-scorecard .brand { padding: 0 0 .6rem; }
+      .shared-scorecard .brand > div { display: block; }
+      .shared-scorecard .scoring-nav { display: flex; flex-wrap: wrap; gap: .3rem; margin: 0; padding: 0; }
+      .shared-scorecard .nav { width: auto; padding: .4rem .6rem; font-size: var(--text-small); }
+      .shared-scorecard .nav span { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+<div class="app-shell shared-scorecard">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">v<span>≈</span></span><div>Voices Playground</div></div>
+    <nav class="workspace-nav" aria-label="Scorecard sections">
+      <p class="nav-label">VOICE ARENA</p>
+      <div class="scoring-nav">
+        <a class="nav active" href="#matrix" aria-current="location"><span aria-hidden="true">01</span> Scorecard matrix</a>
+      </div>
+    </nav>
+    <div class="sidebar-foot">Read-only snapshot</div>
+  </aside>
+<main class="voice-arena">
+  <header class="topbar"><span>Voice Arena / Scorecard</span><span class="pill" id="snapshot"></span></header>
+  <div class="page-title"><h1>Arena scorecard</h1></div>
+  <p>Compare each voice and model across content languages, dialects and accents. Each domain has its own matrix.</p>
+  <p class="hint">Scores are AI evaluations on a 1–5 scale, not validated mean opinion scores (MOS).</p>
+  <p id="mixed" class="hint" hidden>This snapshot combines different judging panels, rubrics, or guides. Treat these scores as descriptive, not a controlled head-to-head comparison.</p>
+  <section id="controls" class="card arena-card" aria-labelledby="filters-heading">
+    <h2 id="filters-heading">Voice × language / accent</h2>
+    <p class="hint">Filters apply to all sections. Use the Voice menu to find and select voices by name.</p>
+    <div id="filters" class="field-row filter-bar"></div>
+    <div class="section-with-action"><span id="matches" class="hint" role="status"></span><button id="reset" class="text-button" type="button">Reset filters</button></div>
+    <noscript>This scorecard needs JavaScript to display its tables and filters.</noscript>
+  </section>
+  <section id="matrix" aria-labelledby="matrix-heading">
+    <h2 id="matrix-heading">Domain matrices</h2>
+    <p class="muted">Overall preference from the newest fully assessed result per voice, model, locale, and domain. Select a score for details.</p>
+    <div id="matrices"></div>
+  </section>
+  <section id="breakdown" class="card arena-card" aria-labelledby="breakdown-heading">
+    <h2 id="breakdown-heading">Voice and locale breakdown</h2>
+    <p class="muted">Full-panel rubric scores for each voice, model, locale, and domain. Select a column to sort. A dash means not assessed.</p>
+    <div id="comparison"></div>
+  </section>
+  <section id="issues" class="card arena-card" aria-labelledby="issues-heading">
+    <h2 id="issues-heading">Voice scores and TTS issues</h2>
+    <div id="issues-filters" class="field-row filter-bar" role="group" aria-label="Scorecard filters in TTS issues"></div>
+    <div class="section-with-action"><span id="issues-matches" class="hint"></span><button id="issues-reset" class="text-button" type="button">Reset filters</button></div>
+    <p id="issues-note" class="muted"></p>
+    <div id="issue-groups"></div>
+  </section>
+  <dialog id="detail" class="confirmation-dialog" aria-labelledby="detail-title">
+    <div class="section-with-action"><h2 id="detail-title">Score details</h2><button id="close-detail" class="secondary" type="button" autofocus>Close</button></div>
+    <div id="detail-content"></div>
+  </dialog>
+</main>
+</div>
+<script type="application/json" id="scorecard-data"><!--SCORECARD_DATA--></script>
+<script>
+  'use strict';
+  const byId = id => document.getElementById(id);
+  const data = JSON.parse(byId('scorecard-data').textContent);
+  // Share links may limit the scorecard to specific domains (?domain=a&domain=b).
+  const sharedDomains = new Set(new URLSearchParams(location.search).getAll('domain'));
+  if (sharedDomains.size) data.cells = data.cells.filter(cell => sharedDomains.has(cell.domain));
+  const labels = new Map(data.dimensions.map(({ id, label }) => [id, label]));
+  const issueDescriptions = new Map([
+    ['naturalness', [
+      'The rhythm sounds mechanical or choppy.',
+      'Pitch changes abruptly between phrases.',
+      'A phrase ending stops too soon or trails off unnaturally.',
+    ]],
+    ['articulation', [
+      'A consonant or vowel sounds blurred, substituted, or unclear.',
+      'A syllable is hard to distinguish, even when the rest of the sentence is clear.',
+      'A spoken name, number, or abbreviation sounds malformed.',
+    ]],
+    ['pace', [
+      'Instructions or number sequences sound rushed, while simpler lines drag.',
+      'Pauses split words that belong together or leave too little time between steps.',
+      'The speaking rate changes suddenly within a sentence.',
+    ]],
+    ['expressiveness', [
+      'Reassurance or concern sounds flat, or more dramatic than the line calls for.',
+      'The wrong word is emphasized, or important words receive no emphasis.',
+      'Vocal energy stays flat or changes suddenly.',
+      'Questions and statements have similar pitch patterns.',
+    ]],
+    ['contextFit', [
+      'A greeting sounds too formal, an apology sounds cheerful, or an instruction sounds too casual.',
+      'The tone changes abruptly when the speaker moves from reassurance to next steps.',
+    ]],
+    ['accentFit', [
+      'Vowels, consonants, or word stress sound closer to a different regional variety.',
+      'Sentence intonation does not sound typical for the selected locale.',
+      'In a tonal language, pitch changes may make word distinctions less clear.',
+    ]],
+    ['audioQuality', [
+      'You hear hiss, clicks, brief dropouts, or distortion on louder sounds.',
+      'The voice sounds metallic or muffled.',
+      'Loudness changes unexpectedly between phrases.',
+    ]],
+  ]);
+  const issueExperiments = new Map([
+    ['naturalness', [
+      'Check clean recordings against their transcripts. Include short replies, questions, and longer sentences; mark where phrases begin and end.',
+      'Compare a test with improved phrase-boundary examples against the current model. Keep general speech examples in the mix.',
+    ]],
+    ['articulation', [
+      'Collect examples of sounds that are hard to distinguish in this locale. Ask native reviewers to verify pronunciations and sound labels.',
+      'First check text and pronunciation rules. If the sounds are still unclear, test additional examples of those sounds in training.',
+    ]],
+    ['pace', [
+      'Check examples of short and long sentences at different speaking rates. Mark pauses, especially around numbers and instructions.',
+      'Test an update to timing and pause prediction. Keep text processing unchanged so you can tell whether the timing update helped.',
+    ]],
+    ['expressiveness', [
+      'Use consented recordings in the target locale. Label intent, emphasis, and vocal energy; include neutral and expressive readings of the same text.',
+      'Test a style-controlled model update with a balanced mix of intents and neutral examples. Check that speech stays clear and the voice remains consistent.',
+    ]],
+    ['contextFit', [
+      'Group target-locale examples by situation and intent. For customer service, separate greetings, instructions, reassurance, and escalation.',
+      'Compare a model that uses situation or intent with the current model. Keep general examples to check that other use cases do not regress.',
+    ]],
+    ['accentFit', [
+      'Review consented recordings from multiple native speakers in the target locale. Verify locale labels and cover relevant vowel, stress, or tone contrasts.',
+      'Check how much training data represents each locale. Test a locale-specific update while keeping speaker settings unchanged.',
+    ]],
+    ['audioQuality', [
+      'Check training audio for clipping, compression, background noise, inconsistent sample rates, and transcript or segmentation errors.',
+      'Compare the model’s raw audio with the delivered audio. If the issue is already in the raw audio, test cleaned training data; isolate the vocoder only if your system uses one.',
+    ]],
+  ]);
+  const fields = [['voice', 'Voice'], ['domain', 'Domain'], ['locale', 'Language / accent'], ['model', 'Voice model'], ['gender', 'Gender']];
+  const allLabels = { domain: 'All domains', locale: 'All languages / accents', model: 'All models', gender: 'All genders', voice: 'All voices' };
+  const order = (a, b) => a.localeCompare(b, undefined, { numeric: true });
+  const unique = values => [...new Set(values)].sort(order);
+  const format = value => value == null ? '—' : value.toFixed(2);
+  const selected = new Map(fields.map(([key]) => [key, new Set()]));
+  const filterControls = [];
+  const matrixSorts = new Map();
+  let comparisonSort = { key: 'score', direction: -1 };
+
+  function el(tag, text, attrs = {}) {
+    const node = document.createElement(tag);
+    if (text != null) node.textContent = text;
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+    return node;
+  }
+
+  function grid(label, headers, rows, layout = '') {
+    const region = el('div', null, { class: `table-scroll ${layout}`, role: 'region', 'aria-label': label, tabindex: '0' });
+    const table = el('table', null, { 'aria-label': label });
+    const header = table.createTHead().insertRow();
+    for (const col of headers) header.append(col instanceof Node ? col : el('th', col, { scope: 'col' }));
+    const body = table.createTBody();
+    for (const cells of rows) {
+      const row = body.insertRow();
+      for (const cell of cells) row.append(cell instanceof Node ? cell : el('td', cell));
+    }
+    region.append(table);
+    return region;
+  }
+
+  function headings(columns, sort, update) {
+    return columns.map(([key, label, initial]) => {
+      const active = sort.key === key;
+      const th = el('th', null, { scope: 'col', class: 'sortable-header' });
+      if (active) th.setAttribute('aria-sort', sort.direction === 1 ? 'ascending' : 'descending');
+      const button = el('button', null, { type: 'button', class: 'table-sort-button' });
+      button.append(el('span', label));
+      button.append(el('span', active ? sort.direction === 1 ? ' ↑' : ' ↓' : ' ↕', { 'aria-hidden': 'true' }));
+      button.addEventListener('click', () => {
+        const index = th.cellIndex;
+        const region = th.closest('.table-scroll');
+        const container = region.parentElement;
+        update({ key, direction: active ? -sort.direction : initial });
+        const next = container.isConnected ? container.querySelector('table') :
+          [...byId('matrices').querySelectorAll('.table-scroll')].find(item => item.getAttribute('aria-label') === region.getAttribute('aria-label'))?.querySelector('table');
+        next?.tHead.rows[0].cells[index].querySelector('button')?.focus();
+      });
+      th.append(button);
+      return th;
+    });
+  }
+
+  function compared(a, b, direction) {
+    if (a == null || b == null) return Number(a == null) - Number(b == null);
+    return direction * (typeof a === 'number' ? a - b : order(a, b));
+  }
+
+  function issueRatings(cell) {
+    const scored = cell.ratings.filter(item => Number.isFinite(item.score)).sort((a, b) => a.score - b.score);
+    if (!scored.length) return { items: [], note: 'No dimension scores available.' };
+    const flagged = scored.filter(item => item.score < data.issueThreshold);
+    return flagged.length ? { items: flagged } : {
+      items: scored.filter(item => item.score === scored[0].score),
+      note: `No assessed dimension below ${data.issueThreshold}/5. Lowest rated:`,
+    };
+  }
+
+  function ratingLabel(item) {
+    const value = item.score < data.issueThreshold && Number(format(item.score)) === data.issueThreshold
+      ? `<${format(data.issueThreshold)}` : format(item.score);
+    return `${labels.get(item.id)} · ${value}/5`;
+  }
+
+  function dimensionTable(cell) {
+    if (!cell.ratings.length) return el('p', 'No dimension scores available.');
+    const container = el('div', null, { class: 'dimension-table' });
+    const label = `${cell.voice} / ${cell.model} · ${cell.locale} · ${cell.domain}: dimension scores`;
+    const columns = [['dimension', 'Dimension', 1], ['score', 'Full panel', 1]];
+    function draw(sort) {
+      const sorted = [...cell.ratings].sort((a, b) => (sort.key === 'score'
+        ? compared(a.score, b.score, sort.direction)
+        : compared(labels.get(a.id), labels.get(b.id), sort.direction))
+        || order(labels.get(a.id), labels.get(b.id)));
+      container.replaceChildren(grid(label, headings(columns, sort, draw), sorted.map(item => [
+        el('th', labels.get(item.id), { scope: 'row' }),
+        item.score == null ? 'Not assessed' : `${format(item.score)} / 5`,
+      ])));
+    }
+    draw({ key: 'score', direction: 1 });
+    return container;
+  }
+
+  function appendIssues(container, { items, note }) {
+    if (note) container.append(el('p', note));
+    if (!items.length) return;
+    const ratings = el('ol');
+    for (const item of items) {
+      const issue = el('li');
+      issue.append(el('strong', ratingLabel(item)));
+      if (!note) {
+        const symptoms = el('section', null, { class: 'issue-symptoms' });
+        symptoms.append(el('h4', 'What to listen for'));
+        symptoms.append(el('p', 'These are examples to guide your review, not confirmed findings.'));
+        const symptomList = el('ul');
+        for (const symptom of issueDescriptions.get(item.id) ?? []) symptomList.append(el('li', symptom));
+        symptoms.append(symptomList);
+        issue.append(symptoms);
+        const experiment = issueExperiments.get(item.id);
+        if (experiment) {
+          const guidance = el('div', null, { class: 'issue-guidance' });
+          const dataStep = el('section');
+          dataStep.append(el('h4', '1. Review your data'));
+          dataStep.append(el('p', experiment[0]));
+          const modelStep = el('section');
+          modelStep.append(el('h4', '2. Test one change'));
+          modelStep.append(el('p', experiment[1]));
+          guidance.append(dataStep, modelStep);
+          issue.append(guidance);
+        }
+      }
+      ratings.append(issue);
+    }
+    container.append(ratings);
+  }
+
+  function inspect(cell) {
+    byId('detail-title').textContent = cell.voice;
+    const list = el('dl');
+    for (const [label, value] of [['Model', cell.model], ['Domain', cell.domain], ['Script locale', cell.locale],
+      ['Gender', cell.gender], ['Overall preference', `${format(cell.score)} / 5`],
+    ]) list.append(el('dt', label), el('dd', value));
+    const summary = el('dd');
+    appendIssues(summary, issueRatings(cell));
+    list.append(el('dt', 'Top TTS issues'), summary);
+    byId('detail-content').replaceChildren(list, el('h3', 'Dimension breakdown'), dimensionTable(cell));
+    byId('detail').showModal();
+  }
+
+  function scoreButton(cell) {
+    const value = format(cell.score);
+    const button = el('button', value, { class: 'arena-score', type: 'button',
+      'aria-label': `${cell.voice}, ${cell.model}, ${cell.domain}, ${cell.locale}: ${value} out of 5. View details` });
+    button.addEventListener('click', () => inspect(cell));
+    return button;
+  }
+
+  function scoreCell(cell) {
+    if (!cell) return '—';
+    const td = el('td');
+    td.append(scoreButton(cell));
+    return td;
+  }
+
+  function renderMatrix(rows) {
+    const cards = unique(rows.map(cell => cell.domain)).map(domain => {
+      const section = el('section', null, { class: 'card arena-card' });
+      const locales = unique(rows.filter(cell => cell.domain === domain).map(cell => cell.locale));
+      const voices = new Map();
+      for (const cell of rows.filter(cell => cell.domain === domain)) {
+        const name = JSON.stringify([cell.voice, cell.model]);
+        if (!voices.has(name)) voices.set(name, { voice: cell.voice, model: cell.model, cells: new Map() });
+        voices.get(name).cells.set(cell.locale, cell);
+      }
+      const sort = matrixSorts.get(domain);
+      const sorted = [...voices.values()].sort((a, b) => (sort && sort.key !== 'voice'
+        ? compared(a.cells.get(sort.key)?.score, b.cells.get(sort.key)?.score, sort.direction)
+        : (sort?.direction ?? 1) * (order(a.voice, b.voice) || order(a.model, b.model)))
+        || order(a.voice, b.voice) || order(a.model, b.model));
+      const columns = [['voice', 'Voice / model', 1], ...locales.map(locale => [locale, locale, -1])];
+      section.append(el('h3', domain), grid(`${domain}: voice by locale`,
+        headings(columns, sort ?? { key: 'voice', direction: 1 }, next => { matrixSorts.set(domain, next); renderMatrix(rows); }),
+        sorted.map(row => {
+          const name = el('th', row.voice, { scope: 'row' });
+          if (!row.voice.endsWith(`:${row.model}`)) name.append(el('small', row.model));
+          return [name, ...locales.map(locale => scoreCell(row.cells.get(locale)))];
+        }), 'arena-matrix'));
+      return section;
+    });
+    byId('matrices').replaceChildren(...(cards.length ? cards : [el('p', 'No scorecard results match these filters.')]));
+  }
+
+  function renderComparison(rows) {
+    const ids = data.dimensions.map(({ id }) => id);
+    const columns = [['voice', 'Voice', 1], ['model', 'Model', 1], ['locale', 'Script locale', 1], ['domain', 'Domain', 1],
+      ['gender', 'Gender', 1], ['score', 'Overall preference', -1], ...ids.map(id => [id, labels.get(id), -1])];
+    const rating = (cell, id) => cell.ratings.find(item => item.id === id)?.score;
+    const value = (cell, key) => labels.has(key) ? rating(cell, key) : cell[key];
+    const sorted = [...rows].sort((a, b) => compared(value(a, comparisonSort.key), value(b, comparisonSort.key), comparisonSort.direction)
+      || order(a.voice, b.voice) || order(a.model, b.model) || order(a.locale, b.locale) || order(a.domain, b.domain));
+    byId('comparison').replaceChildren(rows.length ? grid('Voice and locale breakdown',
+      headings(columns, comparisonSort, next => { comparisonSort = next; renderComparison(rows); }),
+      sorted.map(cell => [el('th', cell.voice, { scope: 'row' }), cell.model, cell.locale, cell.domain, cell.gender,
+        scoreCell(cell), ...ids.map(id => format(rating(cell, id)))]), 'arena-dimension-comparison')
+      : el('p', 'No breakdown results match these filters.'));
+  }
+
+  function renderIssues(rows) {
+    const container = byId('issue-groups');
+    const open = new Set([...container.querySelectorAll('details[open]')].map(group => group.dataset.key));
+    const byVoice = new Map();
+    for (const cell of rows) {
+      const name = cell.voice.endsWith(`:${cell.model}`) ? cell.voice.slice(0, -(cell.model.length + 1)) : cell.voice;
+      const key = JSON.stringify([name, cell.model]);
+      if (!byVoice.has(key)) byVoice.set(key, { name, model: cell.model, domains: new Map() });
+      const { domains } = byVoice.get(key);
+      if (!domains.has(cell.domain)) domains.set(cell.domain, []);
+      domains.get(cell.domain).push(cell);
+    }
+    const groups = [...byVoice].sort(([, a], [, b]) => order(a.name, b.name) || order(a.model, b.model))
+      .map(([key, { name, model, domains }]) => {
+        const voice = el('details', null, { class: 'issue-voice', 'data-key': key });
+        voice.open = byVoice.size === 1 || open.has(key);
+        const summary = el('summary');
+        summary.append(el('strong', name), el('span', ` · ${model}`, { class: 'muted' }));
+        voice.append(summary);
+        for (const domain of unique([...domains.keys()])) {
+          const cells = domains.get(domain).sort((a, b) => order(a.locale, b.locale));
+          const scores = cells.map(cell => cell.score).filter(Number.isFinite);
+          const average = scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : null;
+          const card = el('div', null, { class: 'issue-domain' });
+          const header = el('div', null, { class: 'issue-domain-head' });
+          header.append(el('h3', domain.replace(/_/g, ' ')), el('strong',
+            average == null ? 'No overall preference score' : `${format(average)}/5 · ${scores.length === 1 ? 'Overall preference' : 'Mean overall preference'}`,
+            { class: 'issue-domain-score' }));
+          card.append(header);
+          for (const cell of cells) {
+            const localeKey = JSON.stringify([key, domain, cell.locale]);
+            const locale = el('details', null, { class: 'issue-locale', 'data-key': localeKey });
+            locale.open = (voice.open && cells.length === 1) || open.has(localeKey);
+            const ratings = issueRatings(cell);
+            const label = el('summary', null);
+            const meta = el('span', null, { class: 'issue-locale-meta' });
+            const status = ratings.note ? (ratings.items.length ? 'No review flags' : 'No rubric scores')
+              : `${ratings.items.length} ${ratings.items.length === 1 ? 'review flag' : 'review flags'}`;
+            meta.append(el('strong', cell.locale), el('span', `${format(cell.score)}/5 overall`), el('span', status, { class: 'muted' }));
+            label.append(meta);
+            const body = el('div', null, { class: 'issue-locale-body' });
+            appendIssues(body, ratings);
+            locale.append(label, body);
+            card.append(locale);
+          }
+          voice.append(card);
+        }
+        return voice;
+      });
+    container.replaceChildren(...(groups.length ? groups : [el('p', 'No voices match these filters. Change your selection or reset the filters.')]));
+  }
+
+  function render() {
+    const rows = data.cells.filter(cell =>
+      fields.every(([key]) => !selected.get(key).size || selected.get(key).has(cell[key])));
+    for (const { key, trigger, clear, checkboxes } of filterControls) {
+      const selection = selected.get(key);
+      const count = selection.size;
+      const value = trigger.querySelector('.filter-value');
+      value.textContent = count === 1 ? [...selection][0] : count ? `${count} selected` : allLabels[key];
+      value.title = value.textContent;
+      clear.setAttribute('aria-pressed', String(!count));
+      for (const checkbox of checkboxes) checkbox.checked = selection.has(checkbox.value);
+    }
+    const matches = `${rows.length} of ${data.cells.length} tested combinations`;
+    byId('matches').textContent = matches;
+    byId('issues-matches').textContent = matches;
+    renderMatrix(rows);
+    renderComparison(rows);
+    renderIssues(rows);
+  }
+
+  function positionFilter(trigger, popup) {
+    const rect = trigger.getBoundingClientRect();
+    const viewport = document.documentElement.clientWidth;
+    const width = Math.min(Math.max(rect.width, 224), viewport - 16);
+    const below = innerHeight - rect.bottom;
+    const above = rect.top;
+    const openUp = below < 280 && above > below;
+    Object.assign(popup.style, {
+      width: `${width}px`,
+      left: `${Math.max(8, Math.min(rect.left, viewport - width - 8))}px`,
+      top: openUp ? 'auto' : `${rect.bottom + 4}px`,
+      bottom: openUp ? `${innerHeight - rect.top + 4}px` : 'auto',
+      maxHeight: `${Math.min(300, Math.max(0, (openUp ? above : below) - 12))}px`,
+    });
+  }
+
+  function createFilter(key, label, values, prefix) {
+    const control = el('div', null, { class: 'multi-filter' });
+    const popupId = `${prefix}filter-popup-${key}`;
+    const labelId = `${prefix}filter-label-${key}`;
+    const valueId = `${prefix}filter-value-${key}`;
+    const fieldLabel = el('span', label, { id: labelId });
+    const trigger = el('button', null, { type: 'button', class: 'secondary multi-filter-trigger',
+      popovertarget: popupId, 'aria-labelledby': `${labelId} ${valueId}` });
+    trigger.append(el('span', null, { class: 'filter-value', id: valueId }), el('span', '▾', { 'aria-hidden': 'true' }));
+    const popup = el('div', null, { id: popupId, class: 'multi-filter-popup', popover: 'auto',
+      role: 'group', 'aria-labelledby': labelId });
+    const clear = el('button', allLabels[key], { class: 'multi-filter-all', type: 'button' });
+    clear.addEventListener('click', () => {
+      if (!selected.get(key).size) return;
+      selected.get(key).clear();
+      render();
+    });
+    trigger.disabled = !values.length;
+    const options = [];
+    const checkboxes = [];
+    const empty = el('p', 'No matching options.', { role: 'status' });
+    const search = values.length > 8
+      ? el('input', null, { type: 'search', placeholder: 'Search options', 'aria-label': `Search ${label.toLowerCase()} options` }) : null;
+    function updateOptions() {
+      const query = search?.value.trim().toLowerCase() ?? '';
+      for (const option of options) option.hidden = !option.textContent.toLowerCase().includes(query);
+      empty.hidden = options.some(option => !option.hidden);
+    }
+    if (search) {
+      search.addEventListener('input', updateOptions);
+      popup.append(search);
+    }
+    popup.append(clear);
+    for (const value of values) {
+      const option = el('label');
+      const checkbox = el('input', null, { type: 'checkbox', value });
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selected.get(key).add(value);
+        else selected.get(key).delete(value);
+        render();
+      });
+      option.append(checkbox, ` ${value}`);
+      popup.append(option);
+      options.push(option);
+      checkboxes.push(checkbox);
+    }
+    popup.append(empty);
+    updateOptions();
+    popup.addEventListener('beforetoggle', event => {
+      if (event.newState !== 'open') return;
+      if (search) search.value = '';
+      updateOptions();
+      positionFilter(trigger, popup);
+    });
+    control.append(fieldLabel, trigger, popup);
+    filterControls.push({ key, trigger, popup, clear, checkboxes });
+    return control;
+  }
+
+  for (const [key, label] of fields) {
+    const values = unique(data.cells.map(cell => cell[key]));
+    byId('filters').append(createFilter(key, label, values, ''));
+    byId('issues-filters').append(createFilter(key, label, values, 'issues-'));
+  }
+  function updateOpenFilter() {
+    for (const { trigger, popup } of filterControls) {
+      if (!popup.matches(':popover-open')) continue;
+      const rect = trigger.getBoundingClientRect();
+      if (rect.bottom <= 0 || rect.top >= innerHeight) popup.hidePopover();
+      else positionFilter(trigger, popup);
+    }
+  }
+  addEventListener('scroll', updateOpenFilter, { passive: true });
+  addEventListener('resize', updateOpenFilter);
+  function resetFilters() {
+    for (const selection of selected.values()) selection.clear();
+    for (const { popup } of filterControls) popup.hidePopover();
+    render();
+  }
+  byId('reset').addEventListener('click', resetFilters);
+  byId('issues-reset').addEventListener('click', resetFilters);
+  byId('close-detail').addEventListener('click', () => byId('detail').close());
+  byId('snapshot').textContent = `Exported ${data.exportedOn} (UTC)`;
+  byId('mixed').hidden = !data.mixedSettings;
+  byId('issues-note').textContent = `This shareable scorecard contains average ratings only, not individual judge feedback or Azure Speech review flags. Open the original test report to review pronunciation, pacing and possible speaker changes even when averages are high. Start with the lowest-scoring dimension (below ${data.issueThreshold}/5). The listening cues below are examples, not confirmed causes. Check the original report and audio to find what happened, then review the data and test one model change at a time. Training suggestions are for TTS teams with model-training access.`;
+  render();
+</script>
+</body>
+</html>

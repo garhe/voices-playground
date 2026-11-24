@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export function AudioPlayer({ src, label, autoPlay = false }: { src: string; label: string; autoPlay?: boolean }) {
+export function AudioPlayer({ src, label, autoPlay = false, preload = 'metadata' }: { src: string; label: string; autoPlay?: boolean; preload?: 'none' | 'metadata' }) {
   const [error, setError] = useState('');
   useEffect(() => { setError(''); }, [src]);
 
@@ -20,7 +20,7 @@ export function AudioPlayer({ src, label, autoPlay = false }: { src: string; lab
   }
 
   return <div className="audio-player">
-    <audio controls preload="metadata" src={src} autoPlay={autoPlay} aria-label={label}
+    <audio controls preload={preload} src={src} autoPlay={autoPlay} aria-label={label}
       onLoadedMetadata={event => readDuration(event.currentTarget)}
       onDurationChange={event => { if (event.currentTarget.readyState >= 1) readDuration(event.currentTarget); }}
       onSeeked={event => void playAfterSeek(event.currentTarget)}

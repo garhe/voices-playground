@@ -47,3 +47,33 @@ test('unresponsive polling requests time out rather than blocking reconnection',
     assert.match(String(await failed), /Local app response timed out/);
   } finally { stop(); }
 });
+
+test('lightweight queue polling keeps delivering updates while history times out and recovers', async context => {
+  const timers = context.mock.timers;
+  timers.enable({ apis: ['setTimeout'] });
+  const queue: number[] = [];
+  const history: string[] = [];
+  const failures: unknown[] = [];
+  let queueCalls = 0, historyCalls = 0;
+  const stopQueue = startPolling(async () => ++queueCalls, value => queue.push(value), error => assert.fail(String(error)));
+  const stopHistory = startPolling(signal => {
+    if (++historyCalls > 1) return Promise.resolve('latest history');
+    return new Promise<string>((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }, value => history.push(value), error => failures.push(error), 6000);
+  try {
+    await Promise.resolve();
+    for (let i = 0; i < 5; i++) {
+      timers.tick(2000);
+      await Promise.resolve();
+    }
+    assert.deepEqual(queue, [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(history, []);
+    assert.equal(failures.length, 1);
+    assert.match(String(failures[0]), /timed out/);
+    timers.tick(6000);
+    await Promise.resolve();
+    assert.deepEqual(history, ['latest history']);
+  } finally { stopQueue(); stopHistory(); }
+});

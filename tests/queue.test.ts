@@ -29,6 +29,106 @@ function gate() {
   return { promise, release };
 }
 
+for (const clipConcurrency of [undefined, 2] as const) {
+  const limit = clipConcurrency ?? 1;
+  test(`mode ${limit} respects its slot budget and keeps later evaluations waiting`, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'voice-clip-concurrency-'));
+    const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const gates = Array.from({ length: 7 }, gate);
+    const fastJudge = gate();
+    const secondJudge = gate();
+    const finishingJudge = gate();
+    const calls: [number, string][] = [];
+    const activeByJudge = new Map<string, number>();
+    let active = 0, peak = 0, peakPerJudge = 0, nextStarted = false;
+    const backend = await createApp({
+      dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+      clipConcurrency, deployments: 'first,second,third',
+      evaluate: async input => {
+        if (input.profile.target === 'Next locale') {
+          nextStarted = true;
+          assert.equal(active, 0);
+        } else {
+          const index = input.pcm[0] - 1;
+          const judge = input.judge.deployment;
+          calls.push([index, judge]);
+          const count = (activeByJudge.get(judge) ?? 0) + 1;
+          activeByJudge.set(judge, count);
+          peakPerJudge = Math.max(peakPerJudge, count);
+          peak = Math.max(peak, ++active);
+          const hold = judge === 'third' ? finishingJudge : judge === 'second' ? secondJudge : index === 0 ? fastJudge : gates[index];
+          await hold.promise;
+          active--;
+          activeByJudge.set(judge, activeByJudge.get(judge)! - 1);
+        }
+        const result = assessment();
+        result.scores.contextFit = 4;
+        return { assessment: result };
+      },
+    });
+    backend.app.use(backend.errors); server.on('request', backend.app);
+    const url = `http://127.0.0.1:${address.port}`;
+    const audio = gates.map((_, i) => clip({ file: `collection/Candidate A/clip-${i}.wav` }));
+    const readQueue = async () => await (await fetch(`${url}/api/queue`)).json() as TestQueueState;
+    async function queue(target: string, clipIds: string[]) {
+      const response = await fetch(`${url}/api/jobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: target, profile: { ...profile, target }, clipIds, consent: true, enqueue: true }),
+      });
+      assert.equal(response.status, 201);
+      return await response.json() as Job;
+    }
+    try {
+      for (const [i, input] of audio.entries()) await backend.store.saveClip(input, Buffer.alloc(48000, i + 1));
+      const first = await queue('First locale', audio.map(input => input.id));
+      const later = await queue('Next locale', [audio[0].id]);
+      await until(async () => active, value => value === limit * 3);
+      assert.deepEqual(calls.map(([index]) => index).sort(), limit === 2 ? [0, 0, 0, 1, 1, 1] : [0, 0, 0]);
+      assert.equal((await readQueue()).active?.id, first.id);
+      assert.equal((await readQueue()).waiting[0]?.id, later.id);
+      assert.equal(nextStarted, false);
+      if (limit === 2) {
+        fastJudge.release();
+        await until(async () => calls.filter(([index]) => index === 2).length, count => count === 1);
+        assert.deepEqual(calls.filter(([index]) => index === 2), [[2, 'first']]);
+        assert.equal(active, 6);
+        assert.deepEqual(['first', 'second', 'third'].map(judge => activeByJudge.get(judge)), [2, 2, 2]);
+        finishingJudge.release();
+        await until(async () => ['first', 'second', 'third'].map(judge => activeByJudge.get(judge)),
+          counts => counts[0] === 3 && counts[1] === 3 && counts[2] === 0);
+        assert.equal(active, 6);
+        secondJudge.release();
+        await until(async () => ['first', 'second', 'third'].map(judge => activeByJudge.get(judge)),
+          counts => counts[0] === 6 && counts[1] === 0 && counts[2] === 0);
+        assert.equal(active, 6);
+        assert.equal((await readQueue()).active?.id, first.id);
+        assert.equal(nextStarted, false);
+      }
+      fastJudge.release();
+      secondJudge.release();
+      finishingJudge.release();
+      for (const pending of gates) pending.release();
+      await until(readQueue, state => !state.active && !state.waiting.length);
+      assert.equal(peak, limit * 3);
+      assert.equal(peakPerJudge, limit === 2 ? 6 : 1);
+      assert.deepEqual([...calls].sort(), audio.flatMap((_, index) => ['first', 'second', 'third'].map(judge => [index, judge])));
+      assert.equal(nextStarted, true);
+      const saved = await backend.store.jobs();
+      assert.equal(saved.find(job => job.id === first.id)?.results.filter(r => r.status === 'completed').length, audio.length * 3);
+      assert.equal(saved.find(job => job.id === later.id)?.status, 'completed');
+    } finally {
+      fastJudge.release();
+      secondJudge.release();
+      finishingJudge.release();
+      for (const pending of gates) pending.release();
+      backend.cancelActive();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test('fresh installations default to five judges and saved panels survive restart and environment overrides', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-default-panel-'));
   try {
@@ -57,6 +157,7 @@ test('automatic retries finish before later tests without cooldowns or attempt l
     evaluate: async input => {
       calls.push(input.profile.target);
       const result = assessment(4.5);
+      assert.equal(input.collectVoiceDescriptors, true);
       result.scores.contextFit = 4;
       result.speakerAttribution = { role: 'agent', status: 'identified', evidence: 'The agent offers help.' };
       assert.equal(input.role, 'agent');
@@ -294,6 +395,7 @@ test('targeted retries join the FIFO queue, preserve other judgments, and allow 
     firstGate.release();
     await until(state, value => value.active?.id === a.id);
     assert.equal((await post(`/api/jobs/${a.id}/retry`, { consent: true })).status, 409);
+    await until(async () => calls.length, count => count >= 2);
     assert.deepEqual(calls, ['Active', 'Retry A']);
     retryGate.release();
     await until(state, value => !value.active && !value.waiting.length);
@@ -511,21 +613,120 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   assert.doesNotMatch(retryHtml, /Eligible after/);
   assert.match(html, /Running: Current/); assert.match(html, /Pause queue/);
   assert.match(html, /Cancel queued test Next/); assert.match(html, /<details>/);
-  assert.match(html, /<ol><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
+  assert.match(html, /<ol aria-label="Waiting tests in queue order" tabindex="0"><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
   assert.match(render({ paused: true, waiting: [{ id: 'next', name: 'Next' }], error: 'Connection unavailable' }), /Start queue/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.test-queue-row\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;align-items:center;gap:12px\}/);
   assert.match(css, /\.test-queue-row>span\{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis\}/);
   assert.match(css, /\.test-queue-row>button\{justify-self:end\}/);
+  assert.doesNotMatch(css, /\.arena-status-queue|\.arena-queued-tests|\.arena-queue-item/);
 });
 
-test('concurrent queue admissions persist before execution and a dispatch save failure pauses without losing tests', async () => {
+test('workspace queue panels show their own controls and waiting tests', () => {
+  const noop = () => {};
+  const render = (workspace: 'arena' | 'scoring', state: TestQueueState) => renderToStaticMarkup(createElement(TestQueue, {
+    state, workspace, busy: false, onPause: noop, onStart: noop, onCancel: noop,
+  }));
+  const scoring = render('scoring', { paused: true, waiting: [{ id: 'next', name: 'Scoring next' }] });
+  assert.match(scoring, /Scoring test queue.*Scoring next/);
+  assert.match(scoring, /<button class="secondary">Start queue<\/button>/);
+  assert.match(scoring, /Queue controls apply only to this workspace/);
+  assert.doesNotMatch(scoring, /Cancel running test|Pause queue/);
+  const arena = render('arena', { paused: false, active: { id: 'active', name: 'Arena current' }, waiting: [] });
+  assert.match(arena, /Arena test queue.*Running: Arena current/);
+  assert.match(arena, /Cancel running test.*Pause queue/);
+  assert.doesNotMatch(arena, /Start queue|Scoring next/);
+});
+
+test('saved workspace queues run concurrently and pause, cancel and retry independently', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workspace-queues-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const options = { dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only' };
+  const seed = await createApp(options);
+  const jobs = ['Arena first', 'Scoring first', 'Arena next', 'Scoring next'].map((name, i): Job => {
+    const job = fixtureJob();
+    return {
+      ...job, id: randomUUID(), name, status: 'queued', queueOrder: i + 1, autoRetry: false, rubric: RUBRIC_VERSION,
+      profile: { ...job.profile, target: name },
+      arena: i % 2 === 0 ? { domain: 'service', locale: 'en-US', scripts: ['en-US_service'] } : undefined,
+      results: job.results.map(({ clipId, judgeId }) => ({ clipId, judgeId, status: 'pending' })),
+    };
+  });
+  for (const job of jobs) {
+    await seed.store.saveClip(job.clips[0], Buffer.alloc(48000));
+    await seed.store.saveJob(job);
+  }
+  const holds = new Map(jobs.map(job => [job.name, gate()]));
+  const entered = new Set<string>();
+  const backend = await createApp({
+    ...options,
+    evaluate: async ({ profile, signal }) => {
+      entered.add(profile.target);
+      let abort!: () => void;
+      const cancelled = new Promise<void>(resolve => { abort = () => resolve(); });
+      signal.addEventListener('abort', abort, { once: true });
+      try { await Promise.race([holds.get(profile.target)!.promise, cancelled]); }
+      finally { signal.removeEventListener('abort', abort); }
+      if (signal.aborted) throw new Error('Cancelled');
+      return { assessment: assessment() };
+    },
+  });
+  backend.app.use(backend.errors); server.on('request', backend.app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body = {}) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const read = async (workspace: 'arena' | 'scoring') => (await fetch(`${url}/api/queue?workspace=${workspace}`)).json() as Promise<TestQueueState>;
+  const command = async (workspace: 'arena' | 'scoring', action: 'start' | 'pause') =>
+    assert.equal((await post(`/api/queue/${action}?workspace=${workspace}`, { consent: true })).status, 200);
+  const [arenaFirst, scoringFirst, arenaNext, scoringNext] = jobs;
+  try {
+    assert.equal((await read('arena')).paused, true);
+    assert.equal((await read('scoring')).paused, true);
+    assert.deepEqual((await read('arena')).waiting.map(job => job.id), [arenaFirst.id, arenaNext.id]);
+    assert.deepEqual((await read('scoring')).waiting.map(job => job.id), [scoringFirst.id, scoringNext.id]);
+    await command('arena', 'start');
+    assert.equal((await read('scoring')).paused, true);
+    assert.equal((await read('scoring')).active, undefined);
+    await command('scoring', 'start');
+    await until(async () => entered.size, count => count === 2);
+    assert.equal((await read('arena')).active?.id, arenaFirst.id);
+    assert.equal((await read('scoring')).active?.id, scoringFirst.id);
+    await command('arena', 'pause');
+    assert.equal((await read('arena')).active?.id, arenaFirst.id);
+    assert.equal((await read('scoring')).paused, false);
+    assert.equal((await post(`/api/jobs/${arenaFirst.id}/cancel`)).status, 200);
+    await until(() => read('arena'), state => !state.active);
+    assert.equal((await read('scoring')).active?.id, scoringFirst.id);
+    assert.equal((await post(`/api/jobs/${arenaFirst.id}/retry`, { consent: true, autoRetry: false })).status, 202);
+    assert.deepEqual((await read('arena')).waiting.map(job => job.id), [arenaNext.id, arenaFirst.id]);
+    assert.deepEqual((await read('scoring')).waiting.map(job => job.id), [scoringNext.id]);
+    holds.get(scoringFirst.name)!.release();
+    await until(() => read('scoring'), state => state.active?.id === scoringNext.id);
+    assert.equal(entered.has(arenaNext.profile.target), false);
+    await command('arena', 'start');
+    await until(() => read('arena'), state => state.active?.id === arenaNext.id);
+    holds.get(arenaNext.name)!.release();
+    holds.get(arenaFirst.name)!.release();
+    holds.get(scoringNext.name)!.release();
+    await Promise.all((['arena', 'scoring'] as const).map(workspace =>
+      until(() => read(workspace), state => !state.active && !state.waiting.length)));
+  } finally {
+    for (const hold of holds.values()) hold.release();
+    backend.cancelActive(); server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent queue admissions persist before execution and a dispatch save failure retries without losing tests', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-queue-persistence-'));
   const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const calls: string[] = [];
   const backend = await createApp({
     dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    saveRetryDelayMs: 25,
     evaluate: async input => {
       calls.push(input.profile.target);
       const result = assessment(); result.scores.contextFit = 4;
@@ -533,7 +734,7 @@ test('concurrent queue admissions persist before execution and a dispatch save f
     },
   });
 
-  test('bulk redo snapshots saved settings into new queued jobs, preserves originals, and reports per-test failures', async () => {
+  await t.test('bulk redo snapshots saved settings into new queued jobs, preserves originals, and reports per-test failures', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'voice-bulk-tests-'));
     const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -627,14 +828,11 @@ test('concurrent queue admissions persist before execution and a dispatch save f
       if (fail && job.status === 'running') { fail = false; throw new Error('Synthetic disk failure'); }
       return save(job);
     };
-    await post('/api/queue/start', { consent: true });
-    const paused = await state();
-    assert.equal(paused.paused, true);
-    assert.match(paused.error!, /Synthetic disk failure/);
-    assert.equal(paused.waiting.length, 6);
-    assert.deepEqual(calls, []);
-    assert.equal((await backend.store.read<Job>(path.join('jobs', `${persisted[0].id}.json`))).status, 'queued');
-    await post('/api/queue/start', { consent: true });
+    const recovering = await (await post('/api/queue/start', { consent: true })).json() as TestQueueState;
+    assert.equal(recovering.paused, false);
+    assert.equal(recovering.recoveringSave, true);
+    assert.match(recovering.error!, /Synthetic disk failure/);
+    assert.deepEqual(recovering.waiting.map(job => job.id), persisted.map(job => job.id));
     await until(state, value => !value.active && !value.waiting.length);
     assert.deepEqual(calls, persisted.map(job => job.profile.target));
     assert.equal((await state()).error, undefined);

@@ -52,6 +52,19 @@ test('judge numbers, fields and remove buttons share a bottom edge and control h
   assert.match(css, /\.judge>\.judge-avatar,\.judge>\.icon-button\{flex:0 0 36px;width:36px\}/);
 });
 
+test('workspace filters share compact controls and wrap to the available container width', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.filter-bar, \.field-row\.filter-bar \{[^}]*repeat\(auto-fit, minmax\(min\(100%, 11rem\), 1fr\)\)/);
+  assert.match(css, /\.filter-bar input:not\(\[type=checkbox\]\), \.filter-bar select(?:, [^{]+)? \{ height: 36px; min-height: 36px;/);
+  assert.match(css, /\.filter-bar \.multi-filter-trigger \{[^}]*height: 36px; min-height: 36px;/);
+  assert.match(css, /\.filter-bar \.date-control input \{ padding-right: 44px; \}/);
+  assert.match(css, /\.filter-bar--single \{ width: 100%; max-width: 24rem; \}/);
+  for (const file of ['VoiceArena', 'AzureVoicesStudio', 'TestLibrary', 'ScriptGeneration']) {
+    const source = readFileSync(new URL(`../src/${file}.tsx`, import.meta.url), 'utf8');
+    assert.match(source, /className="[^"]*\bfilter-bar\b[^"]*"/, file);
+  }
+});
+
 test('shared surfaces keep opaque fallbacks, readable headers and flat native checkboxes', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /--mica-flyout:\s*rgb\(var\(--theme-surface-rgb\)\);/);
@@ -109,9 +122,8 @@ test('workspace omits the preview badge and redundant bottom footer without disa
   assert.ok(html.includes('Azure usage is billed per your deployment'));
   assert.ok(html.includes('Drop a folder or select your voice collection'));
   assert.ok(html.includes('AI opinion scores are not validated MOS'));
-  assert.match(html, /<option value="single">Single speaker<\/option>/);
-  assert.match(html, /<option value="agent" selected="">Agent only<\/option>/);
-  assert.match(html, /<option value="both">Both, scored separately<\/option>/);
+  assert.match(html, /<summary><span>01 · Evaluation settings/);
+  assert.doesNotMatch(html, /<option value="both">Both, scored separately<\/option>/);
   assert.doesNotMatch(html, /<option value="customer">Customer only<\/option>/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /main \{ max-width: none; padding-bottom: 8px; \}/);
@@ -318,7 +330,8 @@ test('palette hover gradients cover workspace controls, rows and shared menus wi
   assert.match(mixed, /:is\(\.nav, \.history-item\):enabled:is\(:hover, :focus-visible\) \{[^}]*color: var\(--theme-sidebar-ink\)/);
   assert.match(mixed, /\.test-table tbody tr:hover \{[^}]*--mica-text: var\(--mica-hover-text\);[^}]*--theme-heading: var\(--mica-hover-text\);[^}]*background: var\(--mica-hover\);/);
   assert.match(mixed, /::placeholder \{\s*color: var\(--mica-hover-text\);\s*opacity: 1/);
-  for (const selector of ['button:not(.danger, .nav, .history-item):enabled', 'a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
+  assert.match(mixed, /\.test-table-scroll > \.test-table > tbody > tr:hover > :is\(td:first-child:not\(\[colspan\]\), td:nth-child\(2\)\) \{\s*background: var\(--mica-hover\);/);
+  for (const selector of ['button:not(.danger, .nav, .history-item, .arena-score):enabled', 'a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
     assert.ok(mixed.includes(selector), `${selector} uses mixed hover colors`);
   assert.match(mixed, /:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-hover\);\s*color: var\(--mica-hover-text\)/);
   assert.match(mixed, /button\.danger:enabled:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-danger\);\s*color: #ffffff/);
@@ -491,7 +504,9 @@ test('test status labels use title case without changing stored status or semant
 
 test('sidebar expansion loads another batch in place rather than linking to the test library', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(source, /history\.slice\(0, recentLimit\)/);
+  assert.match(source, /const visibleHistory = workspaceHistory\(history, arenaMode \? 'arena' : 'scoring'\)/);
+  assert.match(source, /visibleHistory\.slice\(0, recentLimit\)/);
+  assert.match(source, /visibleHistory\.length - recentLimit/);
   assert.match(source, /onClick=\{\(\) => setRecentLimit\(limit => limit \+ RECENT_TEST_BATCH\)\}/);
   assert.doesNotMatch(source, />View all /);
   assert.doesNotMatch(source, />Back to all tests</);
@@ -525,21 +540,16 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.match(html, /aria-label="Select all eligible tests on this page"/);
   for (const field of ['Test name', 'Test time', 'Test type', 'Best voice', 'Best score', 'Language', 'Gender', 'Actions']) {
     assert.equal((body.match(new RegExp(`data-label="${field}"`, 'g')) ?? []).length, 30);
-    assert.ok(html.includes(`<th scope="col">${field}</th>`));
+    assert.ok(html.includes(field === 'Actions' ? '<th scope="col">Actions</th>'
+      : `<button class="table-sort-button" type="button"><span>${field}</span>`));
   }
   assert.match(html, /\+2 tied/);
   assert.match(html, /title="Talent 60 \/ speaker, Tied talent B \/ speaker, Tied talent C \/ speaker"/);
-  const toolbar = html.split('<div class="test-filters">')[1]?.split('<div class="test-list-meta">')[0];
+  const toolbar = html.split('<div class="test-filters filter-bar">')[1]?.split('<div class="test-list-meta">')[0];
   assert.ok(toolbar);
-  assert.equal((toolbar.match(/<label/g) ?? []).length, 8);
-  assert.match(toolbar, /<label>Test type<select>/);
-  assert.match(toolbar, /<option value=""[^>]*>All test types<\/option>/);
-  assert.match(toolbar, /<option value="audition">Voice Selection<\/option>/);
-  assert.match(toolbar, /<option value="tts">TTS evaluation<\/option>/);
-  assert.match(toolbar, /<label>Test Status<select>/);
-  assert.match(toolbar, /<option value=""[^>]*>All statuses<\/option>/);
-  for (const status of TEST_STATUS_FILTERS)
-    assert.match(toolbar, new RegExp(`<option value="${status}">${status === 'incomplete' ? 'Completed\\*' : testStatusLabel({ status })}</option>`));
+  assert.equal((toolbar.match(/class="multi-filter"/g) ?? []).length, 4);
+  for (const label of ['Voice Selection', 'TTS evaluation', ...TEST_STATUS_FILTERS.map(status => status === 'incomplete' ? 'Completed*' : testStatusLabel({ status }))])
+    assert.ok(toolbar.includes(`/>${label}</label>`), label);
   assert.match(toolbar, /<label[^>]*>From date<\/label>/);
   assert.match(toolbar, /<label[^>]*>To date<\/label>/);
   assert.equal((toolbar.match(/class="date-menu"/g) ?? []).length, 2);
@@ -737,6 +747,8 @@ test('search and combined filters apply before pagination and search all saved t
   assert.equal(filtered.total, 32);
   assert.equal(filtered.entries.length, 2);
   assert.ok(filtered.entries.every(entry => entry.languages.includes('English') && entry.genders.includes('Female')));
+  const multiple = queryTests(values, { ...defaultTestFilters, language: ['english', 'missing'], gender: ['Female', 'Other'], stage: ['audition', 'tts'], status: ['completed', 'incomplete'] }, 2);
+  assert.deepEqual(multiple.entries, filtered.entries);
   assert.equal(queryTests(values, { ...defaultTestFilters, search: '  TEST 65 ' }, 1).entries[0].id, '64');
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Talent 64' }, 1).total, 1);
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Italian', gender: 'Female' }, 1).total, 0);
@@ -967,16 +979,16 @@ test('test type is visible for both evaluation stages in list rows and selected-
 test('setup sections support native collapse and queue/start actions live in the fixed action region', () => {
   const html = renderToStaticMarkup(createElement(App));
   assert.equal((html.match(/<details class="card setup-section" open=""/g) ?? []).length, 2);
-  assert.match(html, /<summary><span>01 · Choose your evaluation/);
+  assert.match(html, /<summary><span>01 · Evaluation settings/);
   assert.match(html, /<summary><span>02 · Your judging panel/);
   assert.match(html, /class="evaluation-action-bar" role="region" aria-label="Evaluation actions"/);
   assert.match(html, /Review readiness &amp; usage/);
   assert.match(html, /class="setup-grid" data-evaluation-open="true" data-panel-open="true"/);
   assert.match(html, /<details class="card recordings-card setup-section" open=""/);
-  assert.match(html, /<summary><span>03 · Bring your recordings/);
-  assert.match(html, /0 recordings · 0 voices · 0 included/);
+  assert.match(html, /<summary><span>03 · Bring your audio files/);
+  assert.match(html, /0 audio files · 0 voices · 0 included/);
   assert.match(html, />Add to queue<\/button>/);
-  assert.match(html, /03<\/span> Folder sorting/);
+  assert.match(html, /FS<\/span> Folder Sorting/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.evaluation-action-bar\{position:fixed;bottom:0;/);
   const actionBar = css.match(/\.evaluation-action-bar\{([^}]+)\}/)?.[1];
@@ -1038,7 +1050,8 @@ test('test titles remain text links and status colors stay semantic rather than 
   assert.match(css, /\.status-badge, \.status-badge\.completed, \.status-badge\.running, \.status-badge\.queued,[^}]*background: Canvas; color: CanvasText/);
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   assert.match(source, /className=\{`status-badge \$\{h.status\}`\}/);
-  assert.match(source, /className=\{`status-badge \$\{r.status\}`\}/);
+  const library = readFileSync(new URL('../src/TestLibrary.tsx', import.meta.url), 'utf8');
+  assert.match(library, /className=\{`status-badge \$\{entry.status\}`\}/);
 });
 
 test('expandable headings are plain full-row disclosures rather than nested button surfaces', () => {
@@ -1090,15 +1103,13 @@ test('result views include the complete evaluation without a judge-language filt
   assert.match(source, /const summary = job \? summarize\(job\) : \[\]/);
   assert.match(source, /const voiceEvidence = job \? summarizeVoiceEvidence\(job\) : \[\]/);
   assert.match(source, /<VoiceImprovement job=\{job\} voices=\{voiceDirectorBriefs\(job\)\}/);
-  assert.match(source, /\{job\.clips\.map\(c => <details className="clip-detail"/);
+  assert.match(source, /<VoiceEvidenceTree job=\{job\}/);
+  const evidence = readFileSync(new URL('../src/VoiceEvidenceTree.tsx', import.meta.url), 'utf8');
+  assert.match(evidence, /for \(const clip of job\.clips\)/);
 });
 
 test('report surfaces and exports expose saved improvement cases without inventing legacy defects', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} \/>/);
-  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} dimension=\{d\.dimension\} \/>/);
-  assert.match(source, /<ImprovementEvidence judge=\{evidence\} profile=\{job\.profile\} \/>/);
-  assert.match(source, /This does not establish a perfect performance/);
   assert.match(source, /row\('dimension_improvement', note/);
   assert.match(source, /DEFECTS & IMPROVEMENTS:/);
   assert.match(source, /notes\(d\.improvements\)/);
@@ -1113,14 +1124,13 @@ test('setup disclosures share compact vertical spacing and inset markers with al
   assert.match(css, /\.setup-section\[open\] > summary::before \{ transform: rotate\(90deg\); \}/);
 });
 
-test('recent evaluation statuses are compact muted text and dimension ratings have tighter spacing', () => {
+test('recent evaluation statuses are compact muted text', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.history-item \.status-badge \{[^}]*padding: 0; border: 0; background: none; font-size: \.6875rem;[^}]*text-transform: none; letter-spacing: 0;/);
   assert.match(css, /\.history-item \.status-badge\.completed \{ color: #b8cdbf; \}/);
   assert.match(css, /\.history-item \.status-badge\.running \{ color: #d6c69d; \}/);
   assert.match(css, /\.history-item \.status-badge\.queued \{ color: #d2b2b2; \}/);
   assert.match(css, /\.history-item:enabled:hover \{ background: #ffffff14;/);
-  assert.match(css, /\.voice-matrix \.matrix-ratings li \{ margin: 3px 0; font-size: var\(--text-caption\); line-height: 1.5; \}/);
 });
 
 test('all UI retry actions use the queue without blocking behind unrelated tests or falling back to legacy resume', () => {
@@ -1172,9 +1182,11 @@ test('folder sorting UI defaults to replacement without a confirmation dialog an
 test('new evaluations load the saved default panel rather than inheriting an old report panel', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const setup = source.split('function beginNewEvaluation() {')[1].split('function updateLanguageAccent')[0];
-  assert.match(setup, /await api<Config>\('\/api\/config'\)/);
+  assert.match(setup, /await getConfiguration\(\)/);
+  assert.match(source.split('async function getConfiguration(')[1], /^[^]*?await api<Config>\('\/api\/config'/);
   assert.match(setup, /judges: sortJudges\(configuration\.judges\)/);
   assert.doesNotMatch(setup, /job\.judges/);
+  assert.match(setup, /evaluationWorkspace\(job\) === \(arenaMode \? 'arena' : 'scoring'\) \? job\.profile : profile/);
   assert.match(source, /Save panel as default/);
 });
 
@@ -1262,6 +1274,9 @@ test('sorting is global and deterministic with unassessed scores always last', (
     assert.equal(all.at(-1)!.bestScore, null);
     assert.equal(all[0].bestScore, sort === 'score-asc' ? 0.05 : 3.2);
   }
+  const withLanguages = values.map((entry, index) => ({ ...entry, languages: index < 60 ? ['en-US'] : ['de-DE'] }));
+  assert.equal(queryTests(withLanguages, { ...defaultTestFilters, sort: 'language-asc' }, 1).entries[0].languages[0], 'de-DE');
+  assert.equal(queryTests(withLanguages, { ...defaultTestFilters, sort: 'language-desc' }, 3).entries.at(-1)?.languages[0], 'de-DE');
 });
 
 test('metadata validation rejects duplicate labels, unknown gender labels and assessment changes', () => {

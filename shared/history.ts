@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import { compareVoiceScores, evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, WEIGHTED_PREFERENCE, type Job, type VoiceGender } from './domain.js';
+import { compareVoiceScores, evaluationName, evaluationWorkspace, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, WEIGHTED_PREFERENCE, type EvaluationWorkspace, type Job, type VoiceGender } from './domain.js';
 import { csvCell } from './csv.js';
+import { compareTableValues, type SortValue } from './tableSort.js';
+import { matchesFilter, type FilterSelection } from './filterSelection.js';
 
 export const testMetadataSchema = z.object({
   name: testNameSchema,
@@ -15,7 +17,7 @@ export type TestHistory = {
   id: string; name: string; createdAt: string; status: Job['status']; stage: Job['profile']['stage'];
   clips: number; voices: string[]; languages: string[]; genders: VoiceGender[];
   bestScore: number | null; bestVoices: { voice: string; role: string }[];
-  incomplete?: boolean;
+  incomplete?: boolean; workspace?: EvaluationWorkspace;
 };
 export function testStatusLabel(test: Pick<TestHistory, 'status' | 'incomplete'>): string {
   return test.status === 'completed' && test.incomplete ? 'Completed*' : test.status[0].toUpperCase() + test.status.slice(1);
@@ -54,6 +56,7 @@ export function testHistory(job: Job): TestHistory {
   const voices = [...new Set(job.clips.map(clip => clip.voice))].sort();
   return {
     id: job.id, name: evaluationName(job), createdAt: job.createdAt, status: job.status,
+    workspace: evaluationWorkspace(job),
     incomplete: job.status === 'completed' && unassessedInputs(job).length > 0,
     stage: job.profile.stage, clips: job.clips.length, voices, ...testNameMetadata(evaluationName(job)),
     bestScore,
@@ -119,12 +122,17 @@ export function testTableCsv(jobs: Job[]): string {
   ];
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
-export type TestSort = 'newest' | 'oldest' | 'name-asc' | 'name-desc' | 'score-desc' | 'score-asc';
+type ExtraSortColumn = 'type' | 'voice' | 'language' | 'gender';
+export type TestSort = 'newest' | 'oldest' | 'name-asc' | 'name-desc' | 'score-desc' | 'score-asc' | `${ExtraSortColumn}-${'asc' | 'desc'}`;
+const extraSortValues: Record<ExtraSortColumn, (entry: TestHistory) => SortValue> = {
+  type: entry => testType(entry.stage), voice: entry => entry.bestScore === null ? null : entry.bestVoices[0]?.voice,
+  language: entry => entry.languages.join(', '), gender: entry => entry.genders.join(', '),
+};
 export const TEST_STATUS_FILTERS = ['completed', 'incomplete', 'running', 'queued', 'cancelled', 'interrupted'] as const;
 export type TestFilters = {
-  search: string; language: string; gender: string; dateFrom: string; dateTo: string; sort: TestSort;
-  status: '' | typeof TEST_STATUS_FILTERS[number];
-  stage: '' | TestHistory['stage'];
+  search: string; language: FilterSelection; gender: FilterSelection; dateFrom: string; dateTo: string; sort: TestSort;
+  status: FilterSelection<typeof TEST_STATUS_FILTERS[number]>;
+  stage: FilterSelection<TestHistory['stage']>;
 };
 export const defaultTestFilters: TestFilters = {
   search: '', language: '', gender: '', dateFrom: '', dateTo: '', sort: 'newest', status: '', stage: '',
@@ -139,12 +147,12 @@ export function queryTests(entries: TestHistory[], filters: TestFilters, request
   const matches = entries.filter(entry => {
     const day = localDay(entry.createdAt);
     return (!search || [entry.name, entry.id, ...entry.voices, ...entry.languages].join('\n').toLocaleLowerCase().includes(search)) &&
-      (!filters.language || entry.languages.some(language => language.toLowerCase() === filters.language.toLowerCase())) &&
-      (!filters.gender || entry.genders.some(gender => gender === filters.gender)) &&
-      (!filters.stage || entry.stage === filters.stage) &&
-      (!filters.status || (filters.status === 'incomplete'
+      matchesFilter(filters.language, selected => entry.languages.some(language => language.toLowerCase() === selected.toLowerCase())) &&
+      matchesFilter(filters.gender, selected => entry.genders.some(gender => gender === selected)) &&
+      matchesFilter(filters.stage, stage => entry.stage === stage) &&
+      matchesFilter(filters.status, status => status === 'incomplete'
         ? entry.status === 'completed' && entry.incomplete === true
-        : entry.status === filters.status && (filters.status !== 'completed' || !entry.incomplete))) &&
+        : entry.status === status && (status !== 'completed' || !entry.incomplete)) &&
       (!filters.dateFrom || day >= filters.dateFrom) && (!filters.dateTo || day <= filters.dateTo);
   }).sort((a, b) => {
     let order = 0;
@@ -153,7 +161,13 @@ export function queryTests(entries: TestHistory[], filters: TestFilters, request
     else if (filters.sort === 'score-asc' || filters.sort === 'score-desc')
       order = a.bestScore === null ? (b.bestScore === null ? 0 : 1) : b.bestScore === null ? -1 :
         (a.bestScore - b.bestScore) * (filters.sort === 'score-asc' ? 1 : -1);
-    else order = a.createdAt.localeCompare(b.createdAt) * (filters.sort === 'oldest' ? 1 : -1);
+    else if (filters.sort === 'newest' || filters.sort === 'oldest')
+      order = a.createdAt.localeCompare(b.createdAt) * (filters.sort === 'oldest' ? 1 : -1);
+    else {
+      const [key, direction] = filters.sort.split('-') as [ExtraSortColumn, 'asc' | 'desc'];
+      const value = extraSortValues[key];
+      order = compareTableValues(value(a), value(b), direction === 'asc' ? 'ascending' : 'descending');
+    }
     return order || b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
   });
   const pages = Math.max(1, Math.ceil(matches.length / pageSize));

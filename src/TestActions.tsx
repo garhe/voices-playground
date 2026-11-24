@@ -92,7 +92,7 @@ export function TestActions({ entry, busy, onEdit, onDelete, onRegenerate, onDow
         <p aria-hidden="true">{group.label}</p>
         {group.actions.map(action => <button key={action.value} role="menuitem" tabIndex={-1} data-action={action.value}
           className={action.value === 'delete' ? 'danger' : undefined} disabled={busy || (!canManageTest(entry) && (action.value === 'edit' || action.value === 'delete'))}
-          onClick={() => choose(action.value)}>{action.label}</button>)}
+          onClick={() => choose(action.value)}>{action.value === 'guidance' && entry.stage === 'tts' ? 'TTS issues CSV' : action.label}</button>)}
       </div>)}
     </div>
   </>;

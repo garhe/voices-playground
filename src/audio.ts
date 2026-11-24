@@ -6,7 +6,7 @@ export type Region = {
 };
 export type Recording = {
   id: string; file: File; path: string; voice: string; duration?: number; channels?: number;
-  regions: Region[]; language: string; include: boolean;
+  regions: Region[]; language: string; include: boolean; ssml?: string; scriptText?: string;
 };
 export function automaticRegions(duration: number, scope: Profile['scope']): Region[] {
   if (!Number.isFinite(duration) || duration < 0.5) throw new Error('Automatic evaluation needs at least 0.5 seconds of decodable audio.');
