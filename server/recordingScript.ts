@@ -6,7 +6,7 @@ import type { Express, Response as ExpressResponse } from 'express';
 import {
   buildRecordingRows, DEFAULT_RECORDING_ROLE, isRecordedRole, MAX_RECORDING_FILE_ROWS, recordingBatchRequestSchema, recordingCharacterCount, recordingDraftSchema, recordingExportSchema, recordingGenerateSchema,
   RECORDING_AGENT_ACKNOWLEDGMENTS, RECORDING_BATCH_CHARACTERS, RECORDING_DATE_TIME_DETAILS, RECORDING_LOCAL_SPEECH,
-  recordingScenarioKey, recordingScriptFileName, recordingScriptTable, recordingVariantKey,
+  recordingScenarioKey, recordingScriptFileName, recordingScriptTable, recordingScriptText, recordingVariantKey,
   type RecordingBatchResult, type RecordingExportResult, type RecordingGenerateRequest, type RecordingRow, type RecordingScript, type RecordingVariant,
 } from '../shared/recordingScript.js';
 import type { ScriptLocaleOption } from '../shared/scriptGeneration.js';
@@ -227,20 +227,24 @@ export function registerRecordingScript(app: Express, { locales, withTextRequest
     }
     const results: RecordingExportResult = [];
     for (const script of input.scripts) {
-      const file = recordingScriptFileName(script.locale, input.name, script.agentGender);
+      const file = recordingScriptFileName(script.locale, input.name, script.agentGender, input.format);
       const target = path.join(directory, file);
       let created = false;
       try {
         const handle = await open(target, 'wx', 0o600);
         created = true;
         try {
-          const workbook = new ExcelJS.Workbook();
-          const sheet = workbook.addWorksheet('Recording script', { views: [{ state: 'frozen', ySplit: 1 }] });
-          sheet.addRows(recordingScriptTable(script, input.recordedRole));
-          [24, 42, 8, 16, 86, 28, 12].forEach((width, index) => { sheet.getColumn(index + 1).width = width; });
-          sheet.getColumn(5).alignment = { wrapText: true, vertical: 'top' };
-          sheet.getRow(1).font = { bold: true };
-          await handle.writeFile(Buffer.from(await workbook.xlsx.writeBuffer()));
+          if (input.format === 'txt') {
+            await handle.writeFile(recordingScriptText(script, input.recordedRole), 'utf8');
+          } else {
+            const workbook = new ExcelJS.Workbook();
+            const sheet = workbook.addWorksheet('Recording script', { views: [{ state: 'frozen', ySplit: 1 }] });
+            sheet.addRows(recordingScriptTable(script, input.recordedRole));
+            [24, 42, 8, 16, 86, 28, 12].forEach((width, index) => { sheet.getColumn(index + 1).width = width; });
+            sheet.getColumn(5).alignment = { wrapText: true, vertical: 'top' };
+            sheet.getRow(1).font = { bold: true };
+            await handle.writeFile(Buffer.from(await workbook.xlsx.writeBuffer()));
+          }
         }
         finally { await handle.close(); }
         results.push({ file, path: target });

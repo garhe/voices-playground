@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import ExcelJS from 'exceljs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -848,6 +849,19 @@ test('generates on the configured Azure connection, reports failed locales, and 
     success.script.utterances.map(({ speaker, text }, index) => [`fr-CA_0000${index + 1}_S${speaker}`, text]));
   assert.equal(await readFile(path.join(output, englishFile), 'utf8'), 'existing');
   assert.deepEqual((await readdir(output)).sort(), [englishFile, frenchFile]);
+  const excelInput = { directory: output, style: brief.style, speakers: 1, format: 'xlsx', scripts: [{
+    ...success.script, utterances: [success.script.utterances[0]],
+  }] };
+  const excelExport = await post('save', excelInput);
+  assert.equal(excelExport.status, 200);
+  const excelFile = frenchFile.replace(/\.txt$/, '.xlsx');
+  assert.deepEqual(await excelExport.json(), [{ file: excelFile, path: path.join(output, excelFile) }]);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(path.join(output, excelFile));
+  const sheet = workbook.getWorksheet('Script');
+  assert.deepEqual(sheet?.getSheetValues(), [, [, 'ID', 'Content'], [, 'fr-CA_00001', success.script.utterances[0].text]]);
+  const duplicateExcel = await post('save', excelInput);
+  assert.match((await duplicateExcel.json())[0].error, /already exists/);
   assert.equal(scriptFileText({ ...english, utterances: [english.utterances[0]] }, 1), 'en-US_00001\tHello.\r\n');
   assert.equal((await post('save', { directory: output, style: brief.style, speakers: 2, scripts: [{ ...english, locale: '../x' }] })).status, 400);
   assert.equal((await post('save', {

@@ -8,7 +8,7 @@ import {
   recordingToneHeader, recordingVariantKey, recordingVariants, type RecordingAgentGender, type RecordingExportResult,
   usesRecordingBatches, type RecordingBatchRun, type RecordingGenerateRequest, type RecordingScript as RecordingScriptData, type RecordingVariant,
 } from '../shared/recordingScript';
-import type { ScriptLocaleOption } from '../shared/scriptGeneration';
+import type { ScriptExportFormat, ScriptLocaleOption } from '../shared/scriptGeneration';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
 import { RecordingBatchScheduler, type RecordingBatchRetry } from './recordingBatchScheduler';
 
@@ -135,6 +135,7 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
   const [directory, setDirectory] = useState(defaults?.directory ?? '');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<RecordingExportResult>();
+  const [exportFormat, setExportFormat] = useState<ScriptExportFormat>('xlsx');
   const [saveError, setSaveError] = useState('');
   const [copied, setCopied] = useState<string>();
   const generation = useRef<AbortController>(undefined);
@@ -383,6 +384,7 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
         const input = recordingExportSchema.parse({
           directory: directory.trim().replace(/^"(.*)"$/, '$1'), name: fileName, recordedRole: results.recordedRole,
           scripts,
+          ...(exportFormat === 'txt' ? { format: exportFormat } : {}),
         });
         savedResults.push(...await request<RecordingExportResult>('/api/recording-script/save', input));
         setSaved([...savedResults]);
@@ -424,7 +426,7 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
               <small>IDs restart at this value in each file.</small></label>
             <label>File name<input value={fileName} maxLength={200} onChange={event => setFileName(event.target.value)} />
               <small>Saved as {recordingVariants([locales[0] ?? 'en-US'], agentGenders).map(target =>
-                <code className="recording-file-example" key={recordingVariantKey(target)}>{recordingScriptFileName(target.locale, fileName || 'script', target.agentGender)}</code>)}</small></label>
+                <code className="recording-file-example" key={recordingVariantKey(target)}>{recordingScriptFileName(target.locale, fileName || 'script', target.agentGender, exportFormat)}</code>)}</small></label>
             <label>Agent characters per locale (optional)<input type="number" min={1} max={MAX_RECORDING_TARGET_CHARACTERS}
               step={1} value={totalCharactersText} onChange={event => setTotalCharactersText(event.target.value)}
               placeholder="e.g. 10000" />
@@ -512,8 +514,8 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
         </div>;
         const script = numberedByVariant.get(key) ?? result.script;
         return <details className="script-preview" key={key} open={index === 0}>
-          <summary>{recordingScriptFileName(script.locale, fileName || 'script', script.agentGender)} · {script.rows.length} rows</summary>
-          {script.rows.length > MAX_RECORDING_ROWS && <p className="muted">Preview shows the first {MAX_RECORDING_ROWS} rows. Copy and Excel export include all rows.</p>}
+          <summary>{recordingScriptFileName(script.locale, fileName || 'script', script.agentGender, exportFormat)} · {script.rows.length} rows</summary>
+          {script.rows.length > MAX_RECORDING_ROWS && <p className="muted">Preview shows the first {MAX_RECORDING_ROWS} rows. Copy and export include all rows.</p>}
           <div className="table-scroll recording-script-table">
             <table>
               <thead><tr><th>ID</th><th>Scenario</th><th>Turn</th><th>Role</th><th>Content</th><th>{recordingToneHeader(results.recordedRole)}</th><th>Wordcount</th></tr></thead>
@@ -533,7 +535,11 @@ export function RecordingScript({ request, active, connected, speechConfigured, 
       <label>Destination folder<input value={directory} disabled={busy} maxLength={2048} required
         onChange={event => { setDirectory(event.target.value); setSaved(undefined); setSaveError(''); }}
         placeholder="C:\Users\You\Documents\Scripts" /></label>
-      <p className="muted">Paste an existing local folder path. Each script is saved as a separate Excel workbook with a header row. Existing files are not overwritten.</p>
+      <label>File type<select value={exportFormat} disabled={busy}
+        onChange={event => { setExportFormat(event.target.value === 'txt' ? 'txt' : 'xlsx'); setSaved(undefined); setSaveError(''); }}>
+        <option value="xlsx">Excel (.xlsx)</option><option value="txt">TXT (.txt)</option>
+      </select></label>
+      <p className="muted">Paste an existing local folder path. Each script is saved separately with all columns and a header row. TXT uses tab-separated columns. Existing files are not overwritten.</p>
       <button className="primary" type="submit" disabled={busy || !numbered.length || !directory.trim() || !fileName.trim()}>
         {numbered.length === 1 ? 'Save 1 recording script' : `Save ${numbered.length} recording scripts`}
       </button>

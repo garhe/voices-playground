@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { scriptFileName } from './scriptGeneration.js';
+import { scriptExportFormatSchema, scriptFileName, type ScriptExportFormat } from './scriptGeneration.js';
 import { studioLocaleCodeSchema } from './studio.js';
 
 export const MAX_RECORDING_BRIEF_LENGTH = 8000;
@@ -123,6 +123,7 @@ export const recordingExportSchema = z.object({
   directory: z.string().trim().min(1, 'Enter a destination folder.').max(2048),
   name: z.string().trim().min(1, 'Enter a file name.').max(200),
   recordedRole: roleSchema,
+  format: scriptExportFormatSchema.optional(),
   scripts: z.array(recordingScriptSchema).min(1).max(RECORDING_EXPORT_BATCH_SIZE)
     .refine(scripts => new Set(scripts.map(recordingVariantKey)).size === scripts.length, 'Each locale and Agent gender combination must be unique.'),
 }).strict();
@@ -201,9 +202,9 @@ export function recordingToneHeader(recordedRole: string): string {
   return recordedRole.trim() ? `${recordedRole.trim()} Emotional Tone` : 'Emotional Tone';
 }
 
-export function recordingScriptFileName(locale: string, name: string, agentGender?: RecordingAgentGender): string {
+export function recordingScriptFileName(locale: string, name: string, agentGender?: RecordingAgentGender, format: ScriptExportFormat = 'xlsx'): string {
   const suffix = agentGender === 'female' ? '_Female' : agentGender === 'male' ? '_Male' : '';
-  return scriptFileName(locale, name).replace(/\.txt$/, `${suffix}.xlsx`);
+  return scriptFileName(locale, name).replace(/\.txt$/, `${suffix}.${format}`);
 }
 
 export function recordingScriptTable(script: RecordingScript, recordedRole: string): (string | number)[][] {
