@@ -4,7 +4,7 @@ import {
   MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, MAX_SCRIPT_UTTERANCES, SCRIPT_EXPORT_BATCH_SIZE,
   scriptBriefFormat, scriptBriefImprovementSchema, scriptBriefSuggestionSchema, scriptExportSchema,
   scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptExportResult,
-  type ScriptGenerationRequest, type ScriptGenerationStatus, type ScriptLocaleOption,
+  type ScriptGenerationStatus, type ScriptLocaleOption,
 } from '../shared/scriptGeneration';
 import { studioLocaleLabel } from '../shared/studioVoices';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
@@ -78,15 +78,13 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const [localeSearch, setLocaleSearch] = useState('');
   const [localeError, setLocaleError] = useState('');
   const [styleOverride, setStyleOverride] = useState<string>();
-  const [speakers, setSpeakers] = useState<ScriptGenerationRequest['speakers']>(1);
   const [utteranceCount, setUtteranceCount] = useState('16');
   const [expressionTags, setExpressionTags] = useState(true);
   const [styleTags, setStyleTags] = useState(defaultStyleTags);
   const [soundTags, setSoundTags] = useState(defaultSoundTags);
   const tagLists = expressionTagListsSchema.safeParse({ styles: parseTagNames(styleTags), sounds: parseTagNames(soundTags) });
   const [prompt, setPrompt] = useState(DEFAULT_SCRIPT_BRIEF);
-  const briefFormat = scriptBriefFormat(prompt);
-  const effectiveSpeakers = briefFormat.speakers ?? speakers;
+  const briefFormat = scriptBriefFormat(prompt, true);
   const effectiveUtteranceCount = briefFormat.utteranceCount ?? utteranceCount;
   const [workspace, setWorkspace] = useState<'generate' | 'tags' | 'recording'>('generate');
   const [defaultBrief, setDefaultBrief] = useState<string | null>(null);
@@ -261,7 +259,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     if (!readyToImprove || controlsDisabled) return;
     clearImprovement();
     if (briefFormat.error) { setImprovementError(briefFormat.error); return; }
-    const input = scriptBriefImprovementSchema.safeParse({ prompt, style, speakers: effectiveSpeakers, consent: true });
+    const input = scriptBriefImprovementSchema.safeParse({ prompt, style, speakers: 1, consent: true });
     if (!input.success) { setImprovementError(input.error.issues[0].message); return; }
     setBusy('improve');
     try {
@@ -296,7 +294,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       return;
     }
     const input = scriptGenerationSchema.safeParse({
-      locales, style, speakers: effectiveSpeakers, utteranceCount: Number(effectiveUtteranceCount),
+      locales, style, speakers: 1, agentOnly: true, utteranceCount: Number(effectiveUtteranceCount),
       prompt, expressionTags, consent: true,
       ...(expressionTags && tagLists.success ? { expressionTagLists: tagLists.data } : {}),
     });
@@ -335,11 +333,11 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     <div className="page-title"><h1>Script Generation</h1></div>
     <div className="button-row" role="group" aria-label="Script Generation workspace">
       <button type="button" className={workspace === 'generate' ? 'primary' : 'secondary'} aria-pressed={workspace === 'generate'}
-        onClick={() => setWorkspace('generate')}>Generate scripts</button>
+        onClick={() => setWorkspace('generate')}>Agent only test script generation</button>
       <button type="button" className={workspace === 'tags' ? 'primary' : 'secondary'} aria-pressed={workspace === 'tags'}
         onClick={() => setWorkspace('tags')}>Script tags</button>
       <button type="button" className={workspace === 'recording' ? 'primary' : 'secondary'} aria-pressed={workspace === 'recording'}
-        onClick={() => setWorkspace('recording')}>Recording script</button>
+        onClick={() => setWorkspace('recording')}>Recording format script</button>
     </div>
     <div className="script-tag-workspace" hidden={workspace !== 'tags'}>
       <ScriptTags request={request} tagLists={tagLists.success ? tagLists.data : undefined}
@@ -378,11 +376,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
               onChange={event => { setStyleOverride(event.target.value); clearImprovement(); }}
               onBlur={event => { if (!event.target.value.trim()) setStyleOverride(undefined); }}
               maxLength={MAX_SCRIPT_STYLE_LENGTH} placeholder="e.g. Warm documentary narration" /></label>
-            <label>Speakers<select value={effectiveSpeakers} disabled={briefFormat.speakers !== undefined}
-              onChange={event => { setSpeakers(event.target.value === '2' ? 2 : 1); clearImprovement(); }}>
-              <option value={1}>One speaker</option><option value={2}>Two speakers</option></select>
-              {briefFormat.speakers !== undefined && <small>From content brief</small>}</label>
-            <label>Utterances per locale<input required type="number" min={effectiveSpeakers} max={MAX_SCRIPT_UTTERANCES}
+            <label>Utterances per locale<input required type="number" min={1} max={MAX_SCRIPT_UTTERANCES}
               value={effectiveUtteranceCount} readOnly={briefFormat.utteranceCount !== undefined}
               onChange={event => setUtteranceCount(event.target.value)} />
               {briefFormat.utteranceCount !== undefined && <small>From content brief</small>}</label>
@@ -391,7 +385,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
             </select></label>
           </div>
           {briefFormat.error ? <p className="error-text" role="alert">{briefFormat.error}</p> :
-            <small className="muted">Set exact counts in the brief (e.g. <code>Speakers: 2</code> and <code>Utterances: 24</code>). Otherwise the form settings apply.</small>}
+            <small className="muted">One speaker only: the Agent. Set an exact utterance count in the brief (e.g. <code>Utterances: 24</code>), or use the form setting.</small>}
           {briefEdited && <small>Unsaved brief edits. {selectedCustomTemplate ? 'Update the selected template or save a new template to reuse them later.' : 'Save a new template to reuse them later.'}</small>}
           <label>Content brief<textarea required rows={4} maxLength={MAX_SCRIPT_BRIEF_LENGTH} value={prompt}
             onChange={event => { setPrompt(event.target.value); setTemplateStatus(''); clearImprovement(); }}

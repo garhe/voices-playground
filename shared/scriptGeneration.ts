@@ -53,7 +53,7 @@ function uniqueLocales(locales: string[]): boolean {
   return new Set(locales.map(locale => locale.toLowerCase())).size === locales.length;
 }
 
-export function scriptBriefFormat(brief: string): { speakers?: 1 | 2; utteranceCount?: number; error?: string } {
+export function scriptBriefFormat(brief: string, agentOnly = false): { speakers?: 1 | 2; utteranceCount?: number; error?: string } {
   const speakers = new Set<number>();
   const utterances = new Set<number>();
   const count = (token: string) => /^one$/i.test(token) ? 1 : /^two$/i.test(token) ? 2 : Number(token);
@@ -71,6 +71,8 @@ export function scriptBriefFormat(brief: string): { speakers?: 1 | 2; utteranceC
     const total = /\b(\d+)\s+utterances?\s+(?:in\s+)?total[.!]?\s*$/i.exec(line);
     if (total && !/\b(?:at least|at most|up to|no more than)\b/i.test(line)) utterances.add(Number(total[1]));
   }
+  if (agentOnly && [...speakers].some(count => count !== 1))
+    return { error: 'Agent only test script generation supports one speaker. Remove any request for additional speakers from the brief.' };
   if (speakers.size > 1 || utterances.size > 1)
     return { error: 'The content brief specifies conflicting counts. Give one speaker count and one utterance total per locale.' };
   const speaker = [...speakers][0];
@@ -88,14 +90,19 @@ export const scriptGenerationSchema = z.object({
   style: styleSchema,
   speakers: speakerCountSchema,
   utteranceCount: z.number().int().min(1).max(MAX_SCRIPT_UTTERANCES),
+  agentOnly: z.literal(true).optional(),
   prompt: briefSchema,
   expressionTags: z.boolean().optional(),
   expressionTagLists: expressionTagListsSchema.optional(),
   consent: z.literal(true),
 }).strict().transform((value, ctx) => {
-  const format = scriptBriefFormat(value.prompt);
+  const format = scriptBriefFormat(value.prompt, value.agentOnly);
   if (format.error) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: format.error });
+    return z.NEVER;
+  }
+  if (value.agentOnly && value.speakers !== 1) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['speakers'], message: 'Agent only test script generation requires one speaker.' });
     return z.NEVER;
   }
   const speakers = format.speakers ?? value.speakers;

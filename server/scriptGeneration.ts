@@ -260,7 +260,9 @@ async function generateLocale(
     'Each text must be on one line, without tabs, line numbers, IDs, headers, speaker labels, file names, or stage directions. Allowed tags are not stage directions.',
     expressionTagInstructions(request),
     'Use the current contentBrief for the spoken structure, roles, sequence, and scenario; do not assume any other template. The supplied speaker and utterance counts are the resolved exact totals for this brief. Count the utterances and verify the speaker IDs before returning. Localize spelling, vocabulary and expressions naturally.',
-    'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
+    request.agentOnly
+      ? 'Return only the Agent’s spoken lines, all as speaker 1. Leave customer and other speakers’ lines implied, even if the brief includes them as context.'
+      : 'Use only speaker 1 for a one-speaker script; use both speakers 1 and 2 for a two-speaker script.',
     ...(formatFeedback ? [`Correct the previous output: ${formatFeedback}`] : []),
     'For customer-service dialogue in any locale, start every agent reply with a brief, audible acknowledgment before answering, checking details, proposing a fix, or confirming a result. A few idiomatic words or one short clause is usually enough; let it flow into the useful information. Do not restate the request, stack thanks and reassurance, or turn a routine check into an apology or speech. Match the customer’s concern: a simple affirmation or thanks for routine turns, concise specific empathy when warranted. Use the local register and conversational particles. A bracketed tag alone never counts. Do not promise unverified outcomes.',
     ...(previousScript ? [

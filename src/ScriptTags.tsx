@@ -218,7 +218,7 @@ export function ScriptTags({
       <details className="script-tag-list-settings">
         <summary>Edit tag lists</summary>
         <div className="script-tag-editor">
-          <small className="muted">Separate names with commas or line breaks. Changes apply to both Script tags and Generate scripts in this session.</small>
+          <small className="muted">Separate names with commas or line breaks. Changes apply to both Script tags and Agent only test script generation in this session.</small>
           <label>Allowed style tags<textarea rows={3} maxLength={4200} value={styleTags} onChange={event => onStyleTagsChange(event.target.value)} /></label>
           <label>Optional sound tags<textarea rows={2} maxLength={4200} value={soundTags} onChange={event => onSoundTagsChange(event.target.value)} /></label>
           <button className="text-button" type="button"

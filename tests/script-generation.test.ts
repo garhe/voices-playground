@@ -39,11 +39,24 @@ test('explicit counts in the current brief override form values independently', 
   assert.throws(() => parse('Speakers: 2\nUtterances: 1'), /one utterance per speaker/);
 });
 
+test('agent-only test generation requires one speaker even when the brief requests more', () => {
+  const input = { ...brief, speakers: 1, agentOnly: true };
+  assert.equal(scriptGenerationSchema.parse({ ...input, prompt: 'Utterances: 24\nReschedule a delivery.' }).utteranceCount, 24);
+  assert.equal(scriptGenerationSchema.parse(input).speakers, 1);
+  assert.throws(() => scriptGenerationSchema.parse({ ...input, speakers: 2 }), /requires one speaker/);
+  assert.throws(() => scriptGenerationSchema.parse({ ...input, prompt: 'Speakers: 2' }), /supports one speaker/);
+  assert.throws(() => scriptGenerationSchema.parse({ ...input, prompt: 'Write a two-speaker dialogue.' }), /supports one speaker/);
+});
+
 test('default content brief keeps tag rules separate and requires hesitations in each call', () => {
   const html = renderToStaticMarkup(createElement(ScriptGeneration, {
     active: false, onConfigure: () => {}, request: async () => { throw new Error('Unexpected request'); },
   }));
   const prompt = html.match(/Content brief<textarea[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
+  assert.match(html, />Agent only test script generation<\/button>/);
+  assert.match(html, />Recording format script<\/button>/);
+  assert.doesNotMatch(html, /<label>Speakers<select/);
+  assert.match(html, /One speaker only: the Agent/);
   assert.ok(prompt);
   const textareaValue = prompt.replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
   assert.match(html, /<\/textarea><\/label><details[^>]*><summary>Expression tags applied: one style tag per sentence<\/summary>.*<\/details><div class="button-row"><button[^>]*>Improve with AI<\/button>.*New template name/);
@@ -70,7 +83,6 @@ test('default content brief keeps tag rules separate and requires hesitations in
   assert.match(prompt, /End any utterance at the question\./);
   assert.match(prompt, /without asterisks; parentheses only for airport codes\./);
   assert.match(html, /Script style<input[^>]*value="Customer_Services"/);
-  assert.match(html, /Speakers<select disabled="">.*?From content brief/);
   assert.match(html, /Utterances per locale<input[^>]*readOnly=""[^>]*value="16"[^>]*>.*?From content brief/);
   assert.doesNotMatch(html, /Leave blank to use the style from the brief/);
   assert.match(html, /<section class="card script-generation-card"><h2>01 · Script brief<\/h2>[\s\S]*?<\/section><section class="card script-generation-card"[^>]*><h2[^>]*>02 · Languages \/ Accents<\/h2>[\s\S]*?Generate preview[\s\S]*?<\/section><\/form><form[^>]*><h2>03 · Preview and save<\/h2>/);
@@ -495,6 +507,10 @@ test('generates on the configured Azure connection, reports failed locales, and 
   const unsupported = await post('generate', { ...brief, locales: ['fr-CA', 'it-IT'] });
   assert.equal(unsupported.status, 400);
   assert.match((await unsupported.json()).error, /it-IT is not in the current Azure Speech voice catalog/);
+  assert.equal(calls.length, 0);
+  const invalidAgentOnly = await post('generate', { ...brief, speakers: 1, agentOnly: true, prompt: 'Speakers: 2' });
+  assert.equal(invalidAgentOnly.status, 400);
+  assert.match((await invalidAgentOnly.json()).error, /supports one speaker/);
   assert.equal(calls.length, 0);
   const response = await post('generate', { ...brief, locales: ['fr-ca', 'es-MX', 'de-DE'] });
   assert.equal(response.status, 200);
