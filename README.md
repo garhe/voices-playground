@@ -16,8 +16,8 @@ Voices Playground is a local app for creating multilingual scripts, synthesizing
 1. On Windows, install **Git** and **Node.js 22.16 or later** (including npm). Open PowerShell and run:
 
    ```powershell
-   git clone https://github.com/garhe/voices-selection.git
-   Set-Location voices-selection
+   git clone https://github.com/garhe/voices-playground.git
+   Set-Location voices-playground
    npm ci
    npm run dev
    ```
@@ -331,7 +331,7 @@ JavaScript call stack.
 
 ## Sharing and installing from GitHub
 
-The source is distributed through the **public** [garhe/voices-selection repository](https://github.com/garhe/voices-selection). Anyone can download it without a collaborator invitation. This is not a hosted website or a GitHub Pages app: each person runs their own local frontend and Node.js backend, with the same evaluation and reporting features.
+The source is distributed through the **public** [garhe/voices-playground repository](https://github.com/garhe/voices-playground). Anyone can download it without a collaborator invitation. The full app runs locally with its own Node.js backend; the [public scorecard](https://garhe.github.io/voices-playground/) is a separate, read-only GitHub Pages site.
 
 Follow [Quick setup](#quick-setup) to clone and launch the app. Leave the terminal running while using it; **Ctrl+C** stops the server. On Windows, the existing `Start-VoiceLab.ps1` launcher is also available after cloning. The historical launcher name and local data-directory name are retained for compatibility.
 
