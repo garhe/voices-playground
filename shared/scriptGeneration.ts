@@ -148,10 +148,14 @@ export type ScriptGenerationStatus = {
   textRequest?: { id: string; kind: 'improve-brief' | 'generate' | 'script-tags' | 'recording-script'; cancelling: boolean };
 };
 
+export const scriptExportFormatSchema = z.enum(['txt', 'xlsx']);
+export type ScriptExportFormat = z.infer<typeof scriptExportFormatSchema>;
+
 export const scriptExportSchema = z.object({
   directory: z.string().trim().min(1, 'Enter a destination folder.').max(2048),
   style: styleSchema,
   speakers: speakerCountSchema,
+  format: scriptExportFormatSchema.optional(),
   scripts: z.array(scriptSchema).min(1).max(SCRIPT_EXPORT_BATCH_SIZE)
     .refine(scripts => uniqueLocales(scripts.map(script => script.locale)), 'Locales must be unique.'),
 }).strict().refine(value => value.scripts.every(script => hasScriptSpeakers(script.utterances, value.speakers)),
@@ -163,16 +167,20 @@ export function hasScriptSpeakers(utterances: z.infer<typeof scriptUtterancesSch
   return seen.has(1) && seen.has(2) === (speakers === 2);
 }
 
-export function scriptFileName(locale: string, style: string): string {
+export function scriptFileName(locale: string, style: string, format: ScriptExportFormat = 'txt'): string {
   // Azure Voices Studio accepts script names of up to 80 characters, excluding the extension.
   const suffix = style.normalize('NFC').replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+/, '')
     .slice(0, 79 - locale.length).replace(/[\uD800-\uDBFF]$/u, '').replace(/_+$/, '');
-  return `${locale}_${suffix || 'script'}.txt`;
+  return `${locale}_${suffix || 'script'}.${format}`;
+}
+
+export function scriptFileRows(script: GeneratedScript, speakers: 1 | 2): [string, string][] {
+  return script.utterances.map(({ speaker, text }, index) => {
+    const number = String(index + 1).padStart(5, '0');
+    return [`${script.locale}_${number}${speakers === 2 ? `_S${speaker}` : ''}`, text];
+  });
 }
 
 export function scriptFileText(script: GeneratedScript, speakers: 1 | 2): string {
-  return script.utterances.map(({ speaker, text }, index) => {
-    const number = String(index + 1).padStart(5, '0');
-    return `${script.locale}_${number}${speakers === 2 ? `_S${speaker}` : ''}\t${text}\r\n`;
-  }).join('');
+  return scriptFileRows(script, speakers).map(([id, text]) => `${id}\t${text}\r\n`).join('');
 }

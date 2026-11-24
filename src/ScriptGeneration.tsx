@@ -4,12 +4,12 @@ import {
   MAX_SCRIPT_BRIEF_LENGTH, MAX_SCRIPT_STYLE_LENGTH, MAX_SCRIPT_UTTERANCES, SCRIPT_EXPORT_BATCH_SIZE,
   scriptBriefFormat, scriptBriefImprovementSchema, scriptBriefSuggestionSchema, scriptExportSchema,
   scriptFileName, scriptFileText, scriptGenerationSchema, type ScriptExportResult,
-  type ScriptGenerationStatus, type ScriptLocaleOption,
+  type ScriptExportFormat, type ScriptGenerationStatus, type ScriptLocaleOption,
 } from '../shared/scriptGeneration';
 import { studioLocaleLabel } from '../shared/studioVoices';
 import type { AppRequest, AzureSettingsTarget } from './AzureSettings';
 import { resultLocale } from './scriptGenerationProgress';
-import { deleteBriefTemplate, loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, updateBriefTemplate, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
+import { deleteBriefTemplate, loadBriefTemplates, loadDefaultBrief, saveBriefTemplate, saveDefaultBrief, updateBriefTemplate, MAX_TEMPLATE_NAME_LENGTH, type BriefTemplate } from './scriptBriefTemplates';
 import { ScriptTags } from './ScriptTags';
 import { RecordingScript } from './RecordingScript';
 
@@ -124,6 +124,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
   const command = useRef({ pending: false, revision: 0 });
   const preview = runStatus?.run;
   const [saved, setSaved] = useState<ScriptExportResult>();
+  const [exportFormat, setExportFormat] = useState<ScriptExportFormat>('txt');
   const [generationError, setGenerationError] = useState('');
   const [saveError, setSaveError] = useState('');
   const [busy, setBusy] = useState<'improve' | 'save'>();
@@ -255,6 +256,16 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
     } catch (error) { setTemplateError(errorText(error)); }
   }
 
+  function saveCurrentDefaultBrief() {
+    setTemplateStatus(''); setTemplateError('');
+    try {
+      saveDefaultBrief(window.localStorage, prompt);
+      setDefaultBrief(prompt);
+      setSelectedTemplate('');
+      setTemplateStatus('Current brief saved as the default in this browser.');
+    } catch (error) { setTemplateError(errorText(error)); }
+  }
+
   async function improveBrief() {
     if (!readyToImprove || controlsDisabled) return;
     clearImprovement();
@@ -321,6 +332,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         const input = scriptExportSchema.parse({
           directory: directory.trim().replace(/^"(.*)"$/, '$1'), style: preview.input.style, speakers: preview.input.speakers,
           scripts: scripts.slice(index, index + SCRIPT_EXPORT_BATCH_SIZE),
+          ...(exportFormat === 'xlsx' ? { format: exportFormat } : {}),
         });
         results.push(...await request<ScriptExportResult>('/api/script-generation/save', input));
         setSaved([...results]);
@@ -422,6 +434,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
                 onChange={event => setTemplateName(event.target.value)}
                 onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); if (!event.nativeEvent.isComposing) saveTemplate(); } }} /></label>
               <button className="secondary" type="button" disabled={!templateName.trim() || !prompt.trim()} onClick={saveTemplate}>Save as template</button>
+              <button className="secondary" type="button" disabled={!prompt.trim()} onClick={saveCurrentDefaultBrief}>Save brief as default</button>
               {selectedCustomTemplate && <>
                 <button className="secondary" type="button" disabled={!briefEdited || !prompt.trim()} onClick={updateTemplate}>Update template</button>
                 <button className="secondary danger" type="button" onClick={deleteTemplate}>Delete template</button>
@@ -509,7 +522,7 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
         const key = `${preview.id}:${locale}`;
         return 'script' in result
           ? <details className="script-preview" key={key} open={locale === preview.firstLocale}>
-            <summary>{scriptFileName(locale, preview.input.style)} · {result.script.utterances.length} utterances</summary>
+            <summary>{scriptFileName(locale, preview.input.style, exportFormat)} · {result.script.utterances.length} utterances</summary>
             <pre>{scriptFileText(result.script, preview.input.speakers)}</pre>
             {actions}
           </details>
@@ -522,7 +535,13 @@ export function ScriptGeneration({ request, active, connected, speechConfigured,
       <label>Destination folder<input value={directory} disabled={controlsDisabled} maxLength={2048}
         onChange={event => { setDirectory(event.target.value); setSaved(undefined); setSaveError(''); }}
         placeholder="C:\Users\You\Documents\Scripts" required /></label>
-      <p className="muted">Paste an existing local folder path. Filenames use the locale and script style, for example <code>en-US_Warm_documentary_narration.txt</code>. Each UTF-8 line contains an utterance filename, a tab, and spoken text. Existing files are not overwritten.</p>
+      <label>File type<select value={exportFormat} disabled={controlsDisabled}
+        onChange={event => { setExportFormat(event.target.value === 'xlsx' ? 'xlsx' : 'txt'); setSaved(undefined); setSaveError(''); }}>
+        <option value="txt">TXT (.txt)</option><option value="xlsx">Excel (.xlsx)</option>
+      </select></label>
+      <p className="muted">Paste an existing local folder path. {exportFormat === 'txt'
+        ? 'TXT uses Studio-ready tab-separated IDs and spoken text.'
+        : 'Excel contains ID and Content columns.'} Existing files are not overwritten.</p>
       <button className="primary" disabled={controlsDisabled || !scripts.length || !directory.trim()} type="submit">
         {scripts.length === 1 ? 'Save 1 script' : scripts.length ? `Save ${scripts.length} scripts` : 'Save scripts'}
       </button>

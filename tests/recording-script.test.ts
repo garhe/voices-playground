@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
@@ -263,6 +263,14 @@ test('generates and saves recording scripts through the Recording script routes'
   assert.equal(maleWorkbook.getWorksheet('Recording script')?.getCell('A5').value, '000123456789012346');
   const again = await (await post('save', save)).json();
   assert.match(again[0].error, /already exists/);
+  const textExport = await post('save', { ...save, format: 'txt' });
+  assert.equal(textExport.status, 200);
+  const textFiles = await textExport.json();
+  assert.deepEqual(textFiles.map((item: { file: string }) => item.file),
+    ['en-US_Customer_service_Female.txt', 'en-US_Customer_service_Male.txt']);
+  for (const [index, item] of textFiles.entries()) {
+    assert.equal(await readFile(item.path, 'utf8'), recordingScriptText(numbered[index], 'Agent'));
+  }
   const unspecified = await post('save', { ...save, scripts: [script] });
   assert.equal(unspecified.status, 200);
   assert.equal((await unspecified.json())[0].file, 'en-US_Customer_service.xlsx');

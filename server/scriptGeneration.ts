@@ -1,11 +1,12 @@
 import { open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import ExcelJS from 'exceljs';
 import type { Express, Response as ExpressResponse } from 'express';
 import { z } from 'zod';
 import {
   foundryResponsesEndpointSchema, hasScriptSpeakers, MAX_SCRIPT_BRIEF_LENGTH, scriptBriefImprovementSchema, scriptBriefSuggestionSchema,
-  scriptDeploymentSchema, scriptExportSchema, scriptFileName, scriptFileText,
+  scriptDeploymentSchema, scriptExportSchema, scriptFileName, scriptFileRows, scriptFileText,
   SCRIPT_PROGRESS_CONTENT_TYPE, scriptGenerationSchema, scriptSettingsSchema, scriptUtterancesSchema, type GeneratedScript, type ScriptDeploymentSettings, type ScriptExportResult,
   type ScriptGenerationRequest, type ScriptGenerationResult, type ScriptGenerationStatus,
 } from '../shared/scriptGeneration.js';
@@ -589,13 +590,23 @@ export function registerScriptGeneration(app: Express, {
     }
     const results: ScriptExportResult = [];
     for (const script of input.scripts) {
-      const file = scriptFileName(script.locale, input.style);
+      const file = scriptFileName(script.locale, input.style, input.format);
       const target = path.join(directory, file);
       let created = false;
       try {
         const handle = await open(target, 'wx', 0o600);
         created = true;
-        try { await handle.writeFile(scriptFileText(script, input.speakers), 'utf8'); }
+        try {
+          if (input.format === 'xlsx') {
+            const workbook = new ExcelJS.Workbook();
+            const sheet = workbook.addWorksheet('Script', { views: [{ state: 'frozen', ySplit: 1 }] });
+            sheet.columns = [{ header: 'ID', width: 25 }, { header: 'Content', width: 86 }];
+            sheet.addRows(scriptFileRows(script, input.speakers));
+            sheet.getColumn(2).alignment = { wrapText: true, vertical: 'top' };
+            sheet.getRow(1).font = { bold: true };
+            await handle.writeFile(Buffer.from(await workbook.xlsx.writeBuffer()));
+          } else await handle.writeFile(scriptFileText(script, input.speakers), 'utf8');
+        }
         finally { await handle.close(); }
         results.push({ file, path: target });
       } catch (error) {
