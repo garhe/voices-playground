@@ -4,7 +4,9 @@ import {
   assignRecordingIds, DEFAULT_RECORDING_ID_START, DEFAULT_RECORDING_ROLE, MAX_RECORDING_BRIEF_LENGTH,
   MAX_RECORDING_DOMAINS, MAX_RECORDING_DOMAIN_LENGTH, MAX_RECORDING_ROWS, MAX_RECORDING_TARGET_CHARACTERS, RECORDING_EXPORT_BATCH_SIZE,
   parseRecordingDomains, recordingAgentGenderSchema, recordingBatchResultSchema, recordingBatchRunSchema, recordingExportSchema, recordingGenerateSchema, recordingIdStartSchema, recordingScriptFileName, recordingScriptSchema, recordingScriptText,
-  RECORDING_AGENT_ACKNOWLEDGMENTS, RECORDING_BATCH_CONCURRENCY, RECORDING_BATCH_START_CONCURRENCY, RECORDING_DATE_TIME_DETAILS, RECORDING_LOCAL_SPEECH,
+  RECORDING_AGENT_ACKNOWLEDGMENTS, RECORDING_AGENT_COVERAGE, RECORDING_AGENT_OPENINGS, RECORDING_BATCH_CONCURRENCY, RECORDING_BATCH_START_CONCURRENCY, RECORDING_CONTACT_DETAILS,
+  RECORDING_DATE_TIME_DETAILS, RECORDING_DIALOGUE_VARIETY, RECORDING_DISFLUENCIES, RECORDING_INTERJECTIONS, RECORDING_LOCAL_SPEECH, RECORDING_REFERENCE_DETAILS, RECORDING_SPOKEN_DETAILS,
+  RECORDING_SUBTYPE_COVERAGE,
   recordingToneHeader, recordingVariantKey, recordingVariants, type RecordingAgentGender, type RecordingExportResult,
   usesRecordingBatches, type RecordingBatchRun, type RecordingGenerateRequest, type RecordingScript as RecordingScriptData, type RecordingVariant,
 } from '../shared/recordingScript';
@@ -26,23 +28,30 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : '
 export const DEFAULT_RECORDING_BRIEF = `Recording script: inbound customer-service phone calls
 
 Scope and variety
-- Use the selected locale, Domains field, and optional Agent characters per locale field. Start with 1 call per domain and 8 turns per call. To reach the minimum, add meaningful exchanges or distinct calls, keeping each call between 8 and 20 turns and balancing Agent dialogue across domains. Count only spoken Agent lines, including spaces and punctuation; keep natural Customer replies without counting them. Do not pad with repetition.
-- Vary the incident, underlying cause, investigation, and resolution within each domain across calls, locales, and runs. When earlier cases are available, avoid them. Don't recycle a case by changing only names, dates, amounts, or routes. Use a short, descriptive scenario label for each call.
+- ${RECORDING_AGENT_COVERAGE}
+- ${RECORDING_SUBTYPE_COVERAGE}
+- Cover each selected domain, vary call lengths from 8 to 20 turns, and balance Agent characters across domains. Give each call a short scenario label.
+- ${RECORDING_DIALOGUE_VARIETY}
 
 Call flow and service assurance
-- The Customer speaks first, Customer and Agent alternate, and the Agent closes. Let the Customer's issue, impact, and emotion emerge naturally. Cover necessary verification, investigation, a concrete fix or actionable next step, and confirmation. Thank the caller before closing. Confirm that relevant details match without repeating their full name, address, or phone number; read back only what needs checking. Never promise an unverified outcome.
+- ${RECORDING_AGENT_OPENINGS}
+- Let the issue emerge naturally. Verify as needed, offer and confirm a concrete next step, and thank the caller. Don't repeat personal details or promise an unverified outcome.
 - ${RECORDING_AGENT_ACKNOWLEDGMENTS}
-- Use at most 1 brief greeting across the calls for the locale. If either speaker asks a question, end their utterance with that question.
+- Reserve greetings for Agent-first introductions. If either speaker asks a question, end their utterance with that question.
 
 Spoken delivery
 - ${RECORDING_LOCAL_SPEECH}
-- Follow the locale's grammatical gender and forms of address. Keep the fictional Customer and Agent's genders consistent within each call when relevant. In every turn, use the correct agreement for the current speaker, the person being addressed, and anyone being referred to, as the language requires. Check pronouns, verb forms, adjectives, participles, and titles where applicable. When gender is unspecified and a natural neutral form exists, use it rather than guessing. Do not add gender labels or explanations to the spoken dialogue.
-- Include at least 2 audible hesitations per 2 turns, using local fillers or brief pauses when someone is checking, thinking, or recalling a detail. Place at least half of the hesitations mid-sentence or between sentences inside an utterance, not at the start. Don't interrupt a clear explanation or add stage directions just to meet the count.
-- Keep each turn concise. As a guide where word counts are natural, use 5–20 words for Customer turns and 5–30 for Agent turns. Match each Agent turn to an appropriate tone: Apologetic, Reassuring, Empathetic, Generous, Attentive, Confident, Patient, Grateful, or Cheerful. Vary tones naturally.
+- Keep each speaker's gender consistent. Use the correct agreement for the current speaker, the person being addressed, and anyone being referred to: pronouns, verbs, adjectives, participles, and titles. Prefer natural neutral wording when gender is unspecified; do not speak gender labels.
+- ${RECORDING_DISFLUENCIES}
+- ${RECORDING_INTERJECTIONS}
+- Keep replies concise without a minimum word count. Agent tones: Apologetic, Reassuring, Empathetic, Generous, Attentive, Confident, Patient, Grateful, or Cheerful.
 
 Synthetic details and formatting
 - ${RECORDING_DATE_TIME_DETAILS}
-- Use realistic but fictional localized names, dates, street addresses, and full phone numbers where relevant. Vary them across calls and use reserved fictional number ranges where available. Never use Juniper, 晴禾, or 10/15/2026.
+- ${RECORDING_SPOKEN_DETAILS}
+- ${RECORDING_CONTACT_DETAILS}
+- ${RECORDING_REFERENCE_DETAILS}
+- Vary fictional details across calls. Never use Juniper, 晴禾, or 10/15/2026.
 - In the dialogue, write all numbers as digits for both speakers, including dates, addresses, phone numbers, durations, amounts, and flight numbers. Use local formatting and do not spell the digits out.
 - Whenever reading back a flight route, give the specific airport name at both endpoints as spoken locally, including the city when natural, and follow each name with its matching uppercase 3-letter IATA code in parentheses. Format example only: Hanoi Noi Bai (HAN) to Tokyo Narita (NRT). Never use a city alone or a bare code, and vary the routes.`;
 
